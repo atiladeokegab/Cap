@@ -290,6 +290,9 @@ impl TeleprompterWindow {
         playback_state.update_recording(session.read(cx).phase, session.read(cx).pause_uncertain());
         let recording_events = cx.observe_in(&session, window, |this, session, window, cx| {
             let session = session.read(cx);
+            if let Some(shots) = this.shots.as_mut() {
+                shots.follow(session.shot_take().as_deref());
+            }
             let was_running = this.playback_state.running();
             this.playback_state
                 .update_recording(session.phase, session.pause_uncertain());
@@ -315,11 +318,8 @@ impl TeleprompterWindow {
                 }
                 this.shots = list.map(Shots::new);
                 // Opened mid-take: show the shot the saved marks left on screen.
-                if let (Some(shots), Some((take, _))) = (
-                    this.shots.as_mut(),
-                    RecordingSession::global(cx).read(cx).shot_time(),
-                ) {
-                    shots.open(&take);
+                if let Some(shots) = this.shots.as_mut() {
+                    shots.follow(RecordingSession::global(cx).read(cx).shot_take().as_deref());
                 }
                 this.shots_error = warning;
                 if this.shots.is_some() {
@@ -723,9 +723,11 @@ impl TeleprompterWindow {
                 self.settings_open = false;
                 cx.notify();
             }
-            "n" | "right" => self.mark_shot(shots::Action::Next, cx),
-            "r" => self.mark_shot(shots::Action::Retake, cx),
-            _ => {}
+            _ => {
+                if let Some(action) = shot_key(&event.keystroke) {
+                    self.mark_shot(action, cx);
+                }
+            }
         }
     }
 
@@ -966,10 +968,9 @@ impl TeleprompterWindow {
             .text_size(px(11.))
             .text_color(Hsla::from(theme.gray_12))
             .child(label)
-            .child(
-                div()
-                    .text_color(Hsla::from(theme.gray_9))
-                    .child(crate::hotkeys::shot_key_label(action)),
+            .children(
+                crate::hotkeys::shot_key_label(action, cx)
+                    .map(|chord| div().text_color(Hsla::from(theme.gray_9)).child(chord)),
             )
             .when(!live, |this| this.opacity(0.3))
             .when(live, |this| {
@@ -1300,9 +1301,34 @@ impl TeleprompterWindow {
     }
 }
 
+/// The teleprompter's own shot keys: bare N or Right, bare R. A chord -- the
+/// global Ctrl+Alt+N/R among them -- is not one, so one press marks once.
+fn shot_key(keystroke: &gpui::Keystroke) -> Option<shots::Action> {
+    if keystroke.modifiers.modified() {
+        return None;
+    }
+    match keystroke.key.as_str() {
+        "n" | "right" => Some(shots::Action::Next),
+        "r" => Some(shots::Action::Retake),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_bare_key_marks_a_shot_in_the_window() {
+        let key = |source| shot_key(&gpui::Keystroke::parse(source).unwrap());
+        assert_eq!(key("n"), Some(shots::Action::Next));
+        assert_eq!(key("right"), Some(shots::Action::Next));
+        assert_eq!(key("r"), Some(shots::Action::Retake));
+        // The global chord, already dispatched by the hotkey, and the rest.
+        for chord in ["ctrl-alt-n", "ctrl-alt-r", "cmd-r", "shift-n", "ctrl-right"] {
+            assert_eq!(key(chord), None, "{chord}");
+        }
+    }
 
     #[test]
     fn recording_pause_preserves_manual_playback_intent() {

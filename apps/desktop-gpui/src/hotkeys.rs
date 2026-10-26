@@ -62,14 +62,22 @@ const SHOT_KEYS: [(Code, HotkeyAction); 2] = [
     (Code::KeyR, HotkeyAction::RetakeShot),
 ];
 
-/// [`SHOT_KEYS`] as the teleprompter shows them.
-pub fn shot_key_label(action: crate::shots::Action) -> &'static str {
-    match action {
+/// [`SHOT_KEYS`] as the teleprompter shows them; `None` unless the chord is
+/// actually registered for that action.
+pub fn shot_key_label(action: crate::shots::Action, cx: &App) -> Option<&'static str> {
+    let hotkey = match action {
+        crate::shots::Action::Next => HotkeyAction::NextShot,
+        crate::shots::Action::Retake => HotkeyAction::RetakeShot,
+    };
+    let bound = cx
+        .try_global::<Hotkeys>()
+        .is_some_and(|hotkeys| hotkeys.bindings.iter().any(|(_, bound)| *bound == hotkey));
+    bound.then(|| match action {
         crate::shots::Action::Next if cfg!(target_os = "macos") => "\u{2303}\u{2325}N",
         crate::shots::Action::Retake if cfg!(target_os = "macos") => "\u{2303}\u{2325}R",
         crate::shots::Action::Next => "Ctrl+Alt+N",
         crate::shots::Action::Retake => "Ctrl+Alt+R",
-    }
+    })
 }
 
 const ACTION_KEYS: [(&str, HotkeyAction); 13] = [
@@ -171,6 +179,25 @@ impl Hotkeys {
                     "registering global hotkey failed: {error}"
                 );
                 self.unavailable.push(action);
+            }
+        }
+    }
+
+    /// [`SHOT_KEYS`], after the user's own bindings. A chord the user already
+    /// bound stays theirs alone, so one press never fires two actions; the
+    /// shot action is listed unavailable instead.
+    fn bind_shot_keys(&mut self) {
+        for (code, action) in SHOT_KEYS {
+            let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), code);
+            if self
+                .bindings
+                .iter()
+                .any(|(existing, _)| existing.id() == hotkey.id())
+            {
+                tracing::warn!(?action, ?hotkey, "shot chord already bound to a shortcut");
+                self.unavailable.push(action);
+            } else {
+                self.bind(hotkey, action);
             }
         }
     }
@@ -316,6 +343,8 @@ pub fn unavailable_actions(cx: &App) -> Vec<&'static str> {
                 .unavailable
                 .iter()
                 .map(|action| action.store_key())
+                // Shot actions have no Shortcuts row.
+                .filter(|key| !key.is_empty())
                 .collect()
         })
         .unwrap_or_default()
@@ -842,12 +871,7 @@ fn register_from_store(cx: &mut App) {
         hotkeys.bind(HotKey::new(Some(mods), code), action);
     }
     if hotkeys.shot_keys {
-        for (code, action) in SHOT_KEYS {
-            hotkeys.bind(
-                HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), code),
-                action,
-            );
-        }
+        hotkeys.bind_shot_keys();
     }
     hotkeys.release_idle_manager();
     tracing::info!(count = hotkeys.bindings.len(), "global hotkeys registered");
@@ -1166,6 +1190,36 @@ mod tests {
             hotkeys.capture_stop = None;
         }
         assert!(hotkeys.idle());
+    }
+
+    #[test]
+    fn a_shot_chord_the_user_already_bound_fires_only_their_action() {
+        use super::{Code, HotKey, HotkeyAction, Hotkeys, Modifiers, actions_for};
+
+        let chord = |code| HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), code);
+        let mut hotkeys = Hotkeys {
+            manager: None,
+            bindings: vec![
+                (chord(Code::KeyN), HotkeyAction::StopRecording),
+                (chord(Code::KeyR), HotkeyAction::RestartRecording),
+            ],
+            unavailable: Vec::new(),
+            paused: false,
+            shot_keys: true,
+            #[cfg(target_os = "linux")]
+            capture_stop: None,
+        };
+        hotkeys.bind_shot_keys();
+        for (code, theirs) in [
+            (Code::KeyN, HotkeyAction::StopRecording),
+            (Code::KeyR, HotkeyAction::RestartRecording),
+        ] {
+            assert_eq!(actions_for(&hotkeys.bindings, chord(code).id()), [theirs]);
+        }
+        assert_eq!(
+            hotkeys.unavailable,
+            [HotkeyAction::NextShot, HotkeyAction::RetakeShot]
+        );
     }
 
     #[cfg(target_os = "linux")]

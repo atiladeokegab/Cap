@@ -847,31 +847,34 @@ impl ActiveRecording {
     /// spawn it on tokio without borrowing itself.
     pub fn pause_handle(
         &self,
-    ) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+    ) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<Option<std::time::Instant>>> + Send>>
+    {
         match &self.handle {
             Handle::Studio(handle) => {
                 let handle = handle.clone();
-                Box::pin(async move { handle.pause().await })
+                Box::pin(async move { handle.pause().await.map(|()| None) })
             }
             Handle::Instant(handle) => {
                 let handle = handle.clone();
-                Box::pin(async move { handle.pause().await })
+                Box::pin(async move { handle.pause().await.map(|()| None) })
             }
         }
     }
 
-    /// Owned resume future; see [`Self::pause_handle`].
+    /// Owned resume future; see [`Self::pause_handle`]. A studio resume
+    /// yields the epoch its actor reports for the new segment.
     pub fn resume_handle(
         &self,
-    ) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+    ) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<Option<std::time::Instant>>> + Send>>
+    {
         match &self.handle {
             Handle::Studio(handle) => {
                 let handle = handle.clone();
-                Box::pin(async move { handle.resume().await })
+                Box::pin(async move { handle.resume_at().await.map(Some) })
             }
             Handle::Instant(handle) => {
                 let handle = handle.clone();
-                Box::pin(async move { handle.resume().await })
+                Box::pin(async move { handle.resume().await.map(|()| None) })
             }
         }
     }

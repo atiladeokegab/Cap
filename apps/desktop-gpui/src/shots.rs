@@ -59,7 +59,7 @@ pub struct Line {
 pub struct Shot {
     pub shot_id: String,
     pub title: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present_string")]
     pub on_screen: Option<String>,
     pub lines: Vec<Line>,
 }
@@ -67,9 +67,14 @@ pub struct Shot {
 #[derive(Clone, Debug, Deserialize)]
 pub struct ShotList {
     /// Read only so a title that is not a string fails the parse.
-    #[serde(default, rename = "title")]
+    #[serde(default, rename = "title", deserialize_with = "present_string")]
     _title: Option<String>,
     pub shots: Vec<Shot>,
+}
+
+/// The contract lets an optional string be left out, never be `null`.
+fn present_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    String::deserialize(d).map(Some)
 }
 
 /// Parses and validates a `shotlist.json`, the rules of
@@ -128,10 +133,12 @@ impl ShotClock {
         self.paused = true;
     }
 
-    pub fn resume(&mut self, at: Instant) {
+    /// `at` is the resumed segment's epoch as the recording actor reports
+    /// it. Without one, marks wait for the next resume rather than guess.
+    pub fn resume(&mut self, at: Option<Instant>) {
         self.segment += 1;
-        self.resumed_at = Some(at);
-        self.paused = false;
+        self.resumed_at = at;
+        self.paused = at.is_none();
     }
 
     /// `(segment, time_ms)` at `now`, given the start gate's armed instant.
@@ -212,6 +219,21 @@ impl Shots {
         }
     }
 
+    /// The session's live take, followed as it changes so the shot on screen
+    /// is always the one a press would mark: a take's own place in the list,
+    /// and between takes (no take) the first shot of the next.
+    pub fn follow(&mut self, take: Option<&Path>) {
+        match take {
+            Some(take) => self.open(take),
+            None => {
+                self.current = 0;
+                self.started = false;
+                self.take = None;
+                self.marks.clear();
+            }
+        }
+    }
+
     /// Next starts the shot on screen the first time, then moves on to the
     /// following one; Retake starts the current shot again. Either way the
     /// mark is appended and the take's `shots.json` rewritten whole.
@@ -262,6 +284,8 @@ mod tests {
             br#"{"shots": [{"shot_id": 17}]}"#,
             br#"{"shots": [{"shot_id": "Intro", "title": "x", "lines": []}]}"#,
             br#"{"shots": [{"shot_id": "a", "title": "x", "lines": [{"sentence_id": "s1", "text": ""}]}]}"#,
+            br#"{"title": null, "shots": [{"shot_id": "a", "title": "x", "lines": []}]}"#,
+            br#"{"shots": [{"shot_id": "a", "title": "x", "on_screen": null, "lines": []}]}"#,
         ] {
             assert!(parse(bad).is_err(), "{}", String::from_utf8_lossy(bad));
         }
@@ -332,6 +356,27 @@ mod tests {
     }
 
     #[test]
+    fn a_new_take_shows_its_first_shot_before_any_mark() {
+        let dir = std::env::temp_dir().join(format!("cap-shots-follow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut shots = Shots::new(list());
+        shots.follow(Some(&dir));
+        shots.mark(Action::Next, &dir, (0, 10)).unwrap();
+        shots.mark(Action::Next, &dir, (0, 20)).unwrap();
+        assert_eq!(shots.current().shot_id, "demo");
+        // The take stops: the window shows shot 1 for the next take...
+        shots.follow(None);
+        assert_eq!(
+            (shots.current().shot_id.as_str(), shots.marks().len()),
+            ("intro", 0)
+        );
+        // ...and the same take, still live, keeps its place.
+        shots.follow(Some(&dir));
+        assert_eq!(shots.current().shot_id, "demo");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn next_starts_then_advances_and_stops_at_the_last_shot() {
         // Std only: the acceptance driver's crate compiles these tests too.
         let take = std::env::temp_dir().join(format!("cap-shots-{}", std::process::id()));
@@ -368,10 +413,17 @@ mod tests {
             clock.read(Some(armed), armed + Duration::from_secs(2)),
             None
         );
-        clock.resume(armed + Duration::from_secs(5));
+        clock.resume(Some(armed + Duration::from_secs(5)));
         assert_eq!(
             clock.read(Some(armed), armed + Duration::from_millis(5150)),
             Some((1, 150))
+        );
+        // No epoch from the actor: no mark, never the armed clock's time.
+        clock.pause();
+        clock.resume(None);
+        assert_eq!(
+            clock.read(Some(armed), armed + Duration::from_secs(9)),
+            None
         );
     }
 }

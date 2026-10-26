@@ -753,8 +753,8 @@ impl Message<Pause> for Actor {
 }
 
 #[cfg(target_os = "linux")]
-type ResumeCompletion =
-    futures::future::Shared<futures::future::BoxFuture<'static, Result<(), String>>>;
+type ResumeCompletion<T = ()> =
+    futures::future::Shared<futures::future::BoxFuture<'static, Result<T, String>>>;
 
 #[cfg(target_os = "linux")]
 struct ResumeBuildError {
@@ -769,8 +769,9 @@ struct ResumeAttempt {
     directory: PathBuf,
     result: Arc<std::sync::Mutex<Option<Result<Pipeline, ResumeBuildError>>>>,
     finished: ResumeCompletion,
-    ready: ResumeCompletion,
-    reply: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    /// The resumed segment's epoch, once it records.
+    ready: ResumeCompletion<Instant>,
+    reply: Option<tokio::sync::oneshot::Sender<Result<Instant, String>>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -785,7 +786,7 @@ impl Drop for ResumeWaiterGuard {
 
 #[cfg(target_os = "linux")]
 impl ResumeAttempt {
-    fn ready_future(&self) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
+    fn ready_future(&self) -> futures::future::BoxFuture<'static, anyhow::Result<Instant>> {
         let ready = self.ready.clone();
         let cancellation = ResumeWaiterGuard(self.scope.clone());
         async move {
@@ -795,7 +796,7 @@ impl ResumeAttempt {
         .boxed()
     }
 
-    fn reply(&mut self, result: Result<(), String>) {
+    fn reply(&mut self, result: Result<Instant, String>) {
         if let Some(reply) = self.reply.take() {
             let _ = reply.send(result);
         }
@@ -899,6 +900,7 @@ impl Message<ResumeFinished> for Actor {
                 {
                     let index = *next_index;
                     self.segment_factory.commit_next(&mut pipeline);
+                    let epoch = pipeline.epoch().instant();
                     self.state = Some(ActorState::Recording {
                         pipeline,
                         index,
@@ -908,7 +910,7 @@ impl Message<ResumeFinished> for Actor {
                     if let Some(diagnostic) = &mut self.diagnostic {
                         diagnostic.stage("recording");
                     }
-                    attempt.reply(Ok(()));
+                    attempt.reply(Ok(epoch));
                 } else {
                     let cleanup =
                         discard_resume_pipeline(Some(pipeline), &attempt.scope, &attempt.directory)
@@ -938,7 +940,7 @@ struct Resume;
 
 #[cfg(target_os = "linux")]
 impl Message<Resume> for Actor {
-    type Reply = anyhow::Result<futures::future::BoxFuture<'static, anyhow::Result<()>>>;
+    type Reply = anyhow::Result<futures::future::BoxFuture<'static, anyhow::Result<Instant>>>;
 
     async fn handle(&mut self, _: Resume, ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         if !self.all_tracks_stopped {
@@ -964,7 +966,10 @@ impl Message<Resume> for Actor {
                 next_cursor_id,
                 ..
             }) => (cursors.clone(), *next_cursor_id),
-            Some(ActorState::Recording { .. }) => return Ok(async { Ok(()) }.boxed()),
+            Some(ActorState::Recording { pipeline, .. }) => {
+                let epoch = pipeline.epoch().instant();
+                return Ok(async move { Ok(epoch) }.boxed());
+            }
             None => bail!("Recording is no longer active"),
         };
         let mut factory = self.segment_factory.clone();
@@ -1051,7 +1056,7 @@ async fn notify_after_capture_publication<T>(
 
 #[cfg(not(target_os = "linux"))]
 impl Message<Resume> for Actor {
-    type Reply = anyhow::Result<()>;
+    type Reply = anyhow::Result<Instant>;
 
     async fn handle(&mut self, _: Resume, _: &mut Context<Self, Self::Reply>) -> Self::Reply {
         if !self.all_tracks_stopped {
@@ -1111,7 +1116,10 @@ impl Message<Resume> for Actor {
             None => bail!("Recording no longer active"),
         }
 
-        Ok(())
+        match self.state.as_ref() {
+            Some(ActorState::Recording { pipeline, .. }) => Ok(pipeline.epoch().instant()),
+            _ => bail!("Recording no longer active"),
+        }
     }
 }
 
@@ -2082,6 +2090,12 @@ impl ActorHandle {
     }
 
     pub async fn resume(&self) -> anyhow::Result<()> {
+        self.resume_at().await.map(drop)
+    }
+
+    /// Resumes and returns the resumed segment's epoch: the instant its
+    /// cursor and key events count from, and what shot marks must use.
+    pub async fn resume_at(&self) -> anyhow::Result<Instant> {
         #[cfg(any(target_os = "macos", windows))]
         if self.terminal_started() {
             bail!("Studio terminal cleanup already owns this attempt");
@@ -5078,6 +5092,7 @@ mod tests {
         async fn successful_resume_commits_once_and_stop_handles_the_committed_race() {
             let directory = tempfile::tempdir().unwrap();
             let stop = Arc::new(std::sync::Mutex::new(None));
+            let epoch = Arc::new(std::sync::Mutex::new(None));
             let next_path = directory
                 .path()
                 .join("content/segments/segment-1/display.mp4");
@@ -5085,11 +5100,16 @@ mod tests {
                 directory.path(),
                 Arc::new({
                     let stop = stop.clone();
+                    let epoch = epoch.clone();
                     move |_, _| {
                         let stop = stop.clone();
+                        let epoch = epoch.clone();
                         let next_path = next_path.clone();
                         async move {
+                            // A slow resume: the segment starts well after the ask.
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                             let start_time = Timestamps::now();
+                            *epoch.lock().unwrap() = Some(start_time.instant());
                             let screen = OutputPipeline::builder(next_path)
                                 .with_video::<ResumeVideo>(stop)
                                 .with_timestamps(start_time)
@@ -5113,10 +5133,14 @@ mod tests {
                     }
                 }),
             );
-            handle.resume().await.unwrap();
+            let asked = Instant::now();
+            let resumed_at = handle.resume_at().await.unwrap();
+            // The reply carries the new segment's own epoch, not the ask's time.
+            assert_eq!(Some(resumed_at), *epoch.lock().unwrap());
+            assert!(resumed_at >= asked + Duration::from_millis(100));
             assert!(!handle.is_paused().await.unwrap());
             assert!(!stop.lock().unwrap().as_ref().unwrap().is_cancelled());
-            handle.resume().await.unwrap();
+            assert_eq!(handle.resume_at().await.unwrap(), resumed_at);
             assert_eq!(
                 handle.actor_ref.ask(ResumeStateSnapshot).await.unwrap().5,
                 2
