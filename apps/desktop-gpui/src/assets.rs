@@ -30,9 +30,7 @@ macro_rules! assets {
 const FONTS: &[(&str, &[u8])] = assets!("fonts":
     // The reference design's face: rsms/inter 4.1, SIL OFL 1.1, licence in
     // `assets/fonts/Inter-LICENSE.txt`. SemiBold is embedded because the reference design's
-    // labels and Export button draw at 600, and Light because its start heading
-    // draws at 300.
-    "Inter-Light.ttf",
+    // labels and Export button draw at 600.
     "Inter-Regular.ttf",
     "Inter-Medium.ttf",
     "Inter-SemiBold.ttf",

@@ -72,9 +72,8 @@ pub mod look {
     pub const SECONDARY_CARD_HEIGHT: f32 = 60.;
     pub const SECONDARY_ICON: f32 = 18.;
     pub const SECONDARY_LABEL_SIZE: f32 = 17.;
-    /// Gaps between the start screen's sections, tight enough that the whole
-    /// screen, device rows included, fits the 800px window without scrolling.
-    pub const SECTION_GAP: f32 = 20.;
+    /// Gaps between the start screen's sections.
+    pub const SECTION_GAP: f32 = 32.;
 
     /// The capture bar: a floating pill.
     pub const BAR_HEIGHT: f32 = 52.;

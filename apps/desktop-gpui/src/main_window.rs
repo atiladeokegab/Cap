@@ -6493,6 +6493,7 @@ impl MainWindow {
             .items_center()
             .gap(px(look::SECTION_GAP))
             .w(px(look::START_WIDTH))
+            .pt(px(look::SECTION_GAP))
             .flex_shrink_0()
             // The reference design's start screen leads with one large, light question.
             .child(
@@ -6501,7 +6502,7 @@ impl MainWindow {
                     .text_center()
                     .text_size(px(look::HEADING_SIZE))
                     .line_height(px(look::HEADING_LINE))
-                    .font_weight(FontWeight::LIGHT)
+                    .font_weight(FontWeight::NORMAL)
                     .text_color(self.theme.gray_12)
                     .child(tr::main::target::heading()),
             )
