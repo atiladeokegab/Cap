@@ -16,7 +16,11 @@ use std::{
     fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
@@ -30,6 +34,8 @@ const AUDIO_DELTA: u64 = 256 * 1024;
 const STOP: &str = "stop.json";
 const MANIFEST: &str = "take-manifest.json";
 const LEDGER: &str = "uploaded.jsonl";
+/// Written instead of `stop.json` when the freeze fails.
+const FAILED: &str = "mirror-failed.json";
 
 /// The local config file in the app data folder; the mirror is off without it.
 #[derive(Clone, Deserialize)]
@@ -64,6 +70,8 @@ impl Config {
 pub struct StopReport {
     pub frozen: bool,
     pub drained: bool,
+    /// Why the take cannot complete; a deadline alone leaves this `None`.
+    pub error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -293,88 +301,127 @@ impl Mirror {
         Ok(())
     }
 
-    /// The stop sequence: `stop.json` first, then the whole take frozen into
-    /// the outbox, then the drain for at most `drain`. Call it before Cap's
-    /// remux; whatever is left goes up later through [`Mirror::drain`].
-    pub fn stop(&mut self, stopped_at_unix_ms: u64, drain: Duration) -> StopReport {
-        let deadline = Instant::now() + drain;
+    /// Freezes the whole take into the outbox and writes `stop.json` listing
+    /// every frozen file with its size and SHA-256. Local only, so Cap's
+    /// remux may run once it returns. Any file it cannot stage or hash fails
+    /// it: no `stop.json` is written, so no manifest can follow, and
+    /// `mirror-failed.json` in the outbox says why. Cap's take is untouched.
+    pub fn freeze(&mut self, stopped_at_unix_ms: u64) -> Result<(), String> {
+        let frozen = self.stage(stopped_at_unix_ms);
+        if let Err(error) = &frozen {
+            tracing::error!(%error, take = %self.take.display(), "Mirror freeze failed; this take is not mirrored");
+            let marker = json!({ "stopped_at_unix_ms": stopped_at_unix_ms, "error": error });
+            let marker = serde_json::to_vec_pretty(&marker).expect("JSON value serializes");
+            if let Err(error) = write_atomic(&self.outbox.join(FAILED), &marker) {
+                tracing::error!(%error, "Could not write {FAILED}");
+            }
+        }
+        frozen
+    }
+
+    fn stage(&mut self, stopped_at_unix_ms: u64) -> Result<(), String> {
         let mut files = vec![];
-        walk(&self.take, &self.outbox, &mut files);
+        walk(&self.take, &self.outbox, &mut files).map_err(|e| format!("list take: {e}"))?;
         let mut expected: Vec<String> = files.iter().map(|path| self.relative(path)).collect();
         expected.sort_by_key(|relative| (upload_rank(relative), relative.clone()));
-        // Hashed as they stand at stop, so the VM can trust a partial take (film A-9.4).
-        let listed: Vec<_> = expected
-            .iter()
-            .filter_map(|relative| {
-                let (size, sha256) = hash_file(&self.take.join(relative)).ok()?;
-                Some(json!({ "path": relative, "size": size, "sha256": sha256 }))
-            })
-            .collect();
-        let stop = json!({ "stopped_at_unix_ms": stopped_at_unix_ms, "expected_files": listed });
-        let stop = serde_json::to_vec_pretty(&stop).expect("JSON value serializes");
-        let mut frozen = write_atomic(&self.outbox.join(STOP), &stop).is_ok();
-        if let Err(error) = self.put(STOP, stop, remaining(deadline).min(Duration::from_secs(15))) {
-            tracing::warn!(%error, "stop.json not uploaded yet");
-        }
+        let mut listed = vec![];
+        let mut errors = vec![];
         for relative in &expected {
             let (source, staged) = (self.take.join(relative), self.outbox.join(relative));
-            let result = if is_media(relative) {
+            let staged_ok = if is_media(relative) {
                 link(&source, &staged)
             } else {
                 fs::read(&source).and_then(|body| write_atomic(&staged, &body))
             };
-            if let Err(error) = result {
-                tracing::warn!(%error, relative, "Could not freeze a take file");
-                frozen = false;
+            // Hashed as frozen, so the VM can trust a partial take (film A-9.4).
+            match staged_ok.and_then(|()| hash_file(&staged)) {
+                Ok((size, sha256)) => {
+                    listed.push(json!({ "path": relative, "size": size, "sha256": sha256 }))
+                }
+                Err(error) => errors.push(format!("{relative}: {error}")),
             }
         }
-        let drained = self.drain(Some(deadline));
-        StopReport { frozen, drained }
+        if !errors.is_empty() {
+            return Err(format!("could not freeze {}", errors.join("; ")));
+        }
+        let stop = json!({ "stopped_at_unix_ms": stopped_at_unix_ms, "expected_files": listed });
+        let stop = serde_json::to_vec_pretty(&stop).expect("JSON value serializes");
+        write_atomic(&self.outbox.join(STOP), &stop).map_err(|e| format!("write {STOP}: {e}"))
+    }
+
+    /// The stop sequence: the freeze, then the drain (which PUTs `stop.json`
+    /// first) for at most `drain`. Whatever is left goes up later through
+    /// [`Mirror::drain`].
+    pub fn stop(&mut self, stopped_at_unix_ms: u64, drain: Duration) -> StopReport {
+        if let Err(error) = self.freeze(stopped_at_unix_ms) {
+            return StopReport {
+                frozen: false,
+                drained: false,
+                error: Some(error),
+            };
+        }
+        match self.drain(Some(Instant::now() + drain)) {
+            Ok(drained) => StopReport {
+                frozen: true,
+                drained,
+                error: None,
+            },
+            Err(error) => StopReport {
+                frozen: true,
+                drained: false,
+                error: Some(error),
+            },
+        }
     }
 
     /// Uploads what the outbox still holds after a stop, then the manifest.
-    /// Returns whether the take is complete in the bucket.
-    pub fn drain(&mut self, deadline: Option<Instant>) -> bool {
+    /// `Ok(true)`: the take is complete in the bucket. `Ok(false)`: the
+    /// deadline passed first; call again. `Err`: the frozen take does not
+    /// match `stop.json` (missing, changed, or a path outside the outbox),
+    /// so the manifest is never written.
+    pub fn drain(&mut self, deadline: Option<Instant>) -> Result<bool, String> {
         if self.uploaded.contains_key(MANIFEST) {
-            return true;
+            return Ok(true);
         }
-        let Ok(stop) = fs::read(self.outbox.join(STOP)) else {
-            return false;
-        };
-        let Ok(stop) = serde_json::from_slice::<serde_json::Value>(&stop) else {
-            return false;
-        };
-        let expected: Vec<String> = stop["expected_files"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|file| file["path"].as_str().map(String::from))
-            .collect();
+        let stop = fs::read(self.outbox.join(STOP)).map_err(|e| format!("read {STOP}: {e}"))?;
+        let expected = serde_json::from_slice::<StopFile>(&stop)
+            .map_err(|e| format!("parse {STOP}: {e}"))?
+            .expected_files;
+        if let Some(bad) = expected.iter().find(|file| !inside(&file.path)) {
+            return Err(format!(
+                "{STOP} lists a path outside the take: {:?}",
+                bad.path
+            ));
+        }
+        let outbox = fs::canonicalize(&self.outbox).map_err(|e| format!("outbox: {e}"))?;
+        let stop_sha = sigv4::sha256_hex(&stop);
         let mut backoff = Duration::from_secs(1);
         loop {
-            let mut files = vec![];
             let mut failed = false;
-            for key in std::iter::once(STOP.to_string()).chain(expected.iter().cloned()) {
+            let timeout = deadline.map_or(Duration::from_secs(120), remaining);
+            if let Err(error) = self.put_hashed(STOP, stop.clone(), stop_sha.clone(), timeout) {
+                tracing::warn!(%error, "Upload failed; retrying");
+                failed = true;
+            }
+            for file in &expected {
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                    return false;
+                    return Ok(false);
                 }
-                let Ok(body) = fs::read(self.outbox.join(&key)) else {
-                    tracing::warn!(key, "Missing from the outbox; left out of the manifest");
+                // The bucket already holds exactly this object.
+                if self.uploaded.get(&file.path) == Some(&file.sha256) {
                     continue;
-                };
-                let sha = sigv4::sha256_hex(&body);
-                if key != STOP {
-                    files.push(json!({ "path": key, "size": body.len(), "sha256": sha }));
                 }
+                let body = read_frozen(&outbox, file)?;
                 let timeout = deadline.map_or(Duration::from_secs(120), remaining);
-                if let Err(error) = self.put_hashed(&key, body, sha, timeout) {
+                if let Err(error) = self.put_hashed(&file.path, body, file.sha256.clone(), timeout)
+                {
                     tracing::warn!(%error, "Upload failed; retrying");
                     failed = true;
                 }
             }
             if !failed {
                 let manifest = json!({
-                    "files": files,
+                    "files": expected,
                     "fork_commit": FORK_COMMIT,
                     "contracts_version": CONTRACTS_VERSION,
                     "project_format_version": PROJECT_FORMAT_VERSION,
@@ -383,15 +430,140 @@ impl Mirror {
                 let _ = write_atomic(&self.outbox.join(MANIFEST), &manifest);
                 let timeout = deadline.map_or(Duration::from_secs(120), remaining);
                 match self.put(MANIFEST, manifest, timeout) {
-                    Ok(_) => return true,
+                    Ok(_) => return Ok(true),
                     Err(error) => tracing::warn!(%error, "Manifest upload failed; retrying"),
                 }
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Ok(false);
             }
             let wait = deadline.map_or(backoff, |deadline| backoff.min(remaining(deadline)));
             std::thread::sleep(wait);
             backoff = (backoff * 2).min(Duration::from_secs(30));
         }
     }
+
+    /// Runs the mirror on its own thread: a scan every `every` until
+    /// [`Worker::stop`] (or the take folder disappears).
+    pub fn spawn(mut self, every: Duration) -> io::Result<Worker> {
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (stop, stops) = mpsc::channel::<StopRequest>();
+        let scan_stopping = stopping.clone();
+        std::thread::Builder::new()
+            .name("gcs-mirror".into())
+            .spawn(move || {
+                loop {
+                    match stops.recv_timeout(every) {
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            // A deleted take has nothing left to mirror.
+                            if !self.take.is_dir() {
+                                return;
+                            }
+                            if let Err(error) = self.scan(&scan_stopping) {
+                                tracing::debug!(%error, "Mirror scan incomplete; next pass retries");
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                        Ok(request) => return self.stop_requested(request),
+                    }
+                }
+            })?;
+        Ok(Worker { stopping, stop })
+    }
+
+    fn stop_requested(mut self, request: StopRequest) {
+        let frozen = self.freeze(request.stopped_at_unix_ms);
+        let failed = frozen.is_err();
+        let _ = request.frozen.send(frozen);
+        if failed {
+            return;
+        }
+        let mut drained = self.drain(Some(Instant::now() + request.drain));
+        let _ = request.drained.send(());
+        if drained == Ok(false) {
+            drained = self.drain(None);
+        }
+        if let Err(error) = drained {
+            tracing::error!(%error, "Mirror cannot complete this take");
+        }
+    }
+}
+
+struct StopRequest {
+    stopped_at_unix_ms: u64,
+    drain: Duration,
+    frozen: mpsc::Sender<Result<(), String>>,
+    drained: mpsc::Sender<()>,
+}
+
+/// The handle to a mirror running on its own thread.
+pub struct Worker {
+    stopping: Arc<AtomicBool>,
+    stop: mpsc::Sender<StopRequest>,
+}
+
+impl Worker {
+    /// Runs the stop sequence. Blocks, with no time limit, until the freeze
+    /// is over: `Err` means this take is not mirrored (`mirror-failed.json`
+    /// says why), and Cap carries on as without a mirror. Then waits for the
+    /// drain for about `drain`; uploads still pending carry on in the background.
+    pub fn stop(self, stopped_at_unix_ms: u64, drain: Duration) -> Result<(), String> {
+        self.stopping.store(true, Ordering::Relaxed);
+        let (frozen, frozen_rx) = mpsc::channel();
+        let (drained, drained_rx) = mpsc::channel();
+        self.stop
+            .send(StopRequest {
+                stopped_at_unix_ms,
+                drain,
+                frozen,
+                drained,
+            })
+            .map_err(|_| "mirror thread has exited".to_string())?;
+        frozen_rx
+            .recv()
+            .map_err(|_| "mirror thread exited before the freeze".to_string())??;
+        // The margin covers one request whose timeout outlives the deadline.
+        let _ = drained_rx.recv_timeout(drain + Duration::from_secs(40));
+        Ok(())
+    }
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct Expected {
+    path: String,
+    size: u64,
+    sha256: String,
+}
+
+#[derive(Deserialize)]
+struct StopFile {
+    expected_files: Vec<Expected>,
+}
+
+/// A plain relative path inside the take that is none of the mirror's own files.
+fn inside(relative: &str) -> bool {
+    let path = Path::new(relative);
+    ![STOP, MANIFEST, LEDGER, FAILED].contains(&relative)
+        && path.components().next().is_some()
+        && path
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+}
+
+/// Reads a frozen file only if it is a regular file inside the outbox and
+/// exactly the size and SHA-256 `stop.json` recorded for it.
+fn read_frozen(outbox: &Path, file: &Expected) -> Result<Vec<u8>, String> {
+    let staged = outbox.join(&file.path);
+    let not_frozen = |e: io::Error| format!("frozen {} unreadable: {e}", file.path);
+    let real = fs::canonicalize(&staged).map_err(not_frozen)?;
+    if !real.starts_with(outbox) || !fs::symlink_metadata(&staged).map_err(not_frozen)?.is_file() {
+        return Err(format!("frozen {} resolves outside the outbox", file.path));
+    }
+    let body = fs::read(&real).map_err(not_frozen)?;
+    if body.len() as u64 != file.size || sigv4::sha256_hex(&body) != file.sha256 {
+        return Err(format!("frozen {} no longer matches {STOP}", file.path));
+    }
+    Ok(body)
 }
 
 /// One SigV4-signed XML-API request to any object URL; the body on success.
@@ -477,18 +649,21 @@ fn m4a_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn walk(dir: &Path, skip: &Path, files: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+fn walk(dir: &Path, skip: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
         let path = entry.path();
         if path == skip {
             continue;
         }
-        match entry.file_type() {
-            Ok(kind) if kind.is_dir() => walk(&path, skip, files),
-            Ok(kind) if kind.is_file() => files.push(path),
-            _ => {}
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            walk(&path, skip, files)?;
+        } else if kind.is_file() {
+            files.push(path);
         }
     }
+    Ok(())
 }
 
 /// Hard-links `source` to `staged`, falling back to a copy (another volume).
