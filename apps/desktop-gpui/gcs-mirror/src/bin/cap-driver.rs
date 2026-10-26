@@ -67,33 +67,108 @@ fn mirror(request: &Value) -> Result<Option<Mirror>, String> {
     Ok(Some(mirror))
 }
 
-/// Loads the shot list (inline, or a signed GET of `shotlist_url`), then
-/// plays `script` on an injected clock: the start gate armed at `epoch_ms`,
-/// each step at its `at_ms`. `elapsed_offset_ms` would only skew the bar's
-/// timer, which marks never read.
+/// Loads the shot list (inline, or a signed GET of `shotlist_url` as the
+/// window opens), then plays `script` on an injected clock: the start gate
+/// armed at `epoch_ms` for `take`, each step at its `at_ms`.
+/// `elapsed_offset_ms` would only skew the bar's timer, which marks never
+/// read.
+///
+/// Steps: `next`, `retake`, `pause`, `resume`; `take_start` (follow `take`,
+/// its gate armed at the step, and read the list again), `take_stop`,
+/// `reload` (read it again), and `settle` (let every read in flight land).
+/// Reads run off the script, the way the window's do: a step waits up to
+/// [`READ_WAIT`] for its own read, never for an older one.
 fn shots_op(request: &Value) -> Result<Value, String> {
-    let loaded = match (&request["shotlist"], request["shotlist_url"].as_str()) {
-        (Value::Null, None) => None,
-        (Value::Null, Some(url)) => {
-            Some(fetch_shotlist(request, url).and_then(|b| shots::parse(&b)))
+    let url = request["shotlist_url"].as_str();
+    let mut shots = None;
+    let mut warning = None;
+    let mut reads = shots::Reads::default();
+    let (landed_tx, landed) = std::sync::mpsc::channel::<(u64, Result<shots::ShotList, String>)>();
+    let start_read = |reads: &mut shots::Reads| {
+        let number = reads.start();
+        let (request, url, landed) = (request.clone(), url.map(String::from), landed_tx.clone());
+        std::thread::spawn(move || {
+            let read = url
+                .ok_or_else(|| "no shotlist_url".to_string())
+                .and_then(|url| fetch_shotlist(&request, &url))
+                .and_then(|bytes| shots::parse(&bytes));
+            landed.send((number, read)).ok();
+        });
+        number
+    };
+    // A landed read: the newest replaces the list, a failed one keeps it.
+    let land = |number: u64,
+                read: Result<shots::ShotList, String>,
+                reads: &mut shots::Reads,
+                shots: &mut Option<shots::Shots>,
+                warning: &mut Option<String>| {
+        if !reads.land(number) {
+            return;
         }
-        (list, _) => Some(shots::parse(list.to_string().as_bytes())),
+        match read {
+            Ok(list) => {
+                *warning = None;
+                match shots {
+                    Some(shots) => shots.replace(list),
+                    None => *shots = Some(shots::Shots::new(list)),
+                }
+            }
+            Err(error) => *warning = Some(error.replace('\n', " ")),
+        }
     };
-    let mut shots = match loaded {
-        None => return Ok(json!({ "mode": "free", "marks": [] })),
-        Some(Err(error)) => return Ok(json!({ "mode": "stock", "error": error, "marks": [] })),
-        Some(Ok(list)) => shots::Shots::new(list),
+    // Waits for read `number` (or every read, for `None`) to land.
+    let wait = |number: Option<u64>,
+                reads: &mut shots::Reads,
+                shots: &mut Option<shots::Shots>,
+                warning: &mut Option<String>,
+                in_flight: &mut u64| {
+        let deadline = Instant::now() + READ_WAIT;
+        while *in_flight > 0 {
+            let Ok((landed_number, read)) =
+                landed.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            else {
+                return;
+            };
+            *in_flight -= 1;
+            land(landed_number, read, reads, shots, warning);
+            if number == Some(landed_number) {
+                return;
+            }
+        }
     };
+    let mut in_flight = 0;
+    match (&request["shotlist"], url) {
+        (Value::Null, None) => return Ok(json!({ "mode": "free", "marks": [] })),
+        (Value::Null, Some(_)) => {
+            let number = start_read(&mut reads);
+            in_flight += 1;
+            wait(
+                Some(number),
+                &mut reads,
+                &mut shots,
+                &mut warning,
+                &mut in_flight,
+            );
+        }
+        (list, _) => match shots::parse(list.to_string().as_bytes()) {
+            Ok(list) => shots = Some(shots::Shots::new(list)),
+            Err(error) => return Ok(json!({ "mode": "stock", "error": error, "marks": [] })),
+        },
+    }
     let base = Instant::now();
     let at = |ms: f64| base + Duration::from_secs_f64(ms.max(0.) / 1000.);
-    let armed = at(request["epoch_ms"].as_f64().unwrap_or(0.));
-    let take = request["take"].as_str().map(PathBuf::from);
+    let mut armed = at(request["epoch_ms"].as_f64().unwrap_or(0.));
+    let mut take = request["take"].as_str().map(PathBuf::from);
     let mut clock = shots::ShotClock::default();
     for step in request["script"].as_array().into_iter().flatten() {
+        while let Ok((number, read)) = landed.try_recv() {
+            in_flight -= 1;
+            land(number, read, &mut reads, &mut shots, &mut warning);
+        }
         let now = at(step["at_ms"].as_f64().unwrap_or(0.));
         let action = match step["action"].as_str() {
-            Some("next") => shots::Action::Next,
-            Some("retake") => shots::Action::Retake,
+            Some("next") => Some(shots::Action::Next),
+            Some("retake") => Some(shots::Action::Retake),
             Some("pause") => {
                 clock.pause();
                 continue;
@@ -102,21 +177,78 @@ fn shots_op(request: &Value) -> Result<Value, String> {
                 clock.resume(Some(now));
                 continue;
             }
+            Some("take_start") => {
+                take = step["take"].as_str().map(PathBuf::from);
+                (armed, clock) = (now, shots::ShotClock::default());
+                if let Some(shots) = shots.as_mut() {
+                    shots.follow(take.as_deref());
+                }
+                None
+            }
+            Some("take_stop") => {
+                take = None;
+                if let Some(shots) = shots.as_mut() {
+                    shots.follow(None);
+                }
+                continue;
+            }
+            Some("reload") => None,
+            Some("settle") => {
+                wait(None, &mut reads, &mut shots, &mut warning, &mut in_flight);
+                continue;
+            }
             other => return Err(format!("unknown action {other:?}")),
         };
-        if let (Some(take), Some(time)) = (&take, clock.read(Some(armed), now)) {
+        let Some(action) = action else {
+            // take_start and reload: the list is read again.
+            if url.is_none() {
+                continue;
+            }
+            let number = start_read(&mut reads);
+            in_flight += 1;
+            wait(
+                Some(number),
+                &mut reads,
+                &mut shots,
+                &mut warning,
+                &mut in_flight,
+            );
+            if let (Some(shots), Some(take)) = (shots.as_mut(), take.as_deref()) {
+                shots.follow(Some(take));
+            }
+            continue;
+        };
+        if let (Some(shots), Some(take), Some(time)) =
+            (shots.as_mut(), &take, clock.read(Some(armed), now))
+        {
             shots.mark(action, take, time).map_err(|e| e.to_string())?;
         }
     }
+    let Some(shots) = shots else {
+        return Ok(json!({ "mode": "stock", "error": warning, "warning": warning, "marks": [] }));
+    };
     // What the teleprompter shows for the shot on screen.
     let shot = shots.current();
     let lines: Vec<&str> = shot.lines.iter().map(|line| line.text.as_str()).collect();
+    let progress = shots.list.progress.as_ref().map(|progress| {
+        let rows: Vec<Value> = progress
+            .rows()
+            .into_iter()
+            .map(|(label, ticked)| json!({ "label": label, "ticked": ticked }))
+            .collect();
+        json!({ "summary": progress.summary(), "rows": rows })
+    });
     Ok(json!({
         "mode": "shots",
         "current": { "shot_id": shot.shot_id, "title": shot.title, "on_screen": shot.on_screen, "lines": lines },
         "marks": shots.marks(),
+        "warning": warning.or_else(|| shots.list.warning.clone()),
+        "progress": progress,
     }))
 }
+
+/// How long a step waits for its own shot-list read before going on.
+const READ_WAIT: Duration = Duration::from_secs(1);
 
 /// The teleprompter's script size by default (`store.rs`).
 const SCRIPT_TEXT_PX: f32 = 30.;

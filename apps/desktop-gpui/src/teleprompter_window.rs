@@ -242,6 +242,10 @@ pub struct TeleprompterWindow {
     /// waits for the recording's own resume).
     countdown: Option<Instant>,
     countdown_task: Option<gpui::Task<()>>,
+    /// Shot-list reads in flight; the newest to land wins.
+    reads: shots::Reads,
+    /// The live take last seen: a new one reads the list again.
+    take: Option<std::path::PathBuf>,
 }
 
 impl TeleprompterWindow {
@@ -314,37 +318,19 @@ impl TeleprompterWindow {
             {
                 this.write_mark(action, window, cx);
             }
+            // A take starts: the film may have republished the list (pick-ups).
+            let take = RecordingSession::global(cx).read(cx).shot_take();
+            if take.is_some() && take != this.take {
+                this.read_shot_list(window, cx);
+            }
+            this.take = take;
             cx.notify();
             window.refresh();
         });
 
         // The bucket GET blocks for up to its timeout: off the main thread,
         // with the stock teleprompter until it lands.
-        cx.spawn_in(window, async move |this, cx| {
-            let (list, warning) = cx
-                .background_executor()
-                .spawn(async { load_shot_list() })
-                .await;
-            this.update_in(cx, |this, window, cx| {
-                if let Some(warning) = &warning {
-                    tracing::warn!(%warning, "shot list");
-                }
-                this.shots = list.map(Shots::new);
-                // Opened mid-take: show the shot the saved marks left on screen.
-                if let Some(shots) = this.shots.as_mut() {
-                    shots.follow(RecordingSession::global(cx).read(cx).shot_take().as_deref());
-                }
-                this.shots_error = warning;
-                if this.shots.is_some() {
-                    crate::hotkeys::set_shot_keys(true, cx);
-                    this.focus_root(window, cx);
-                }
-                cx.notify();
-                window.refresh();
-            })
-            .ok();
-        })
-        .detach();
+        cx.defer_in(window, |this, window, cx| this.read_shot_list(window, cx));
 
         crate::theme::bind_window(window, cx);
         Self {
@@ -368,6 +354,8 @@ impl TeleprompterWindow {
             shots_error: None,
             countdown: None,
             countdown_task: None,
+            reads: shots::Reads::default(),
+            take: session.read(cx).shot_take(),
         }
     }
 
@@ -460,6 +448,60 @@ impl TeleprompterWindow {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// Reads the shot list off the main thread: as the window opens (the
+    /// bucket, else the app-data file), and again when a take starts and on
+    /// Reload. The newest read to land wins; a failed one keeps the list it
+    /// had, with its one-line warning.
+    fn read_shot_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let number = self.reads.start();
+        let opening = self.shots.is_none();
+        cx.spawn_in(window, async move |this, cx| {
+            let (list, warning) = cx
+                .background_executor()
+                .spawn(async move {
+                    if opening {
+                        load_shot_list()
+                    } else {
+                        reload_shot_list()
+                    }
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                if !this.reads.land(number) {
+                    return;
+                }
+                if let Some(warning) = &warning {
+                    tracing::warn!(%warning, "shot list");
+                }
+                let Some(list) = list else {
+                    this.shots_error = warning;
+                    cx.notify();
+                    return;
+                };
+                let note = list.warning.clone();
+                let first = this.shots.is_none();
+                let shots = match this.shots.as_mut() {
+                    Some(shots) => {
+                        shots.replace(list);
+                        shots
+                    }
+                    None => this.shots.insert(Shots::new(list)),
+                };
+                // Opened mid-take: show the shot the saved marks left on screen.
+                shots.follow(RecordingSession::global(cx).read(cx).shot_take().as_deref());
+                this.shots_error = warning.or(note);
+                if first {
+                    crate::hotkeys::set_shot_keys(true, cx);
+                    this.focus_root(window, cx);
+                }
+                cx.notify();
+                window.refresh();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// `clamp(state().windowOpacityPercent, 45, 100) / 100`, for the initial
@@ -718,7 +760,32 @@ impl TeleprompterWindow {
 /// [`shots::BUCKET_KEY`] through the mirror's `mirror.json` and signer, else
 /// the app-data [`shots::LOCAL_FILE`]. Blocking.
 pub(crate) fn load_shot_list() -> (Option<shots::ShotList>, Option<String>) {
-    let bucket = cap_gcs_mirror::Config::load(&store::app_data_dir().join("mirror.json"))
+    let bucket = bucket_shot_list()
+        .inspect_err(|error| tracing::info!(%error, "no shot list from the bucket"));
+    shots::pick(bucket, || {
+        std::fs::read(store::app_data_dir().join(shots::LOCAL_FILE))
+    })
+}
+
+/// The list read again: from the bucket when the mirror is set up (a failed
+/// read keeps the last good list, never the app-data file's), else the
+/// app-data file.
+fn reload_shot_list() -> (Option<shots::ShotList>, Option<String>) {
+    let read = match cap_gcs_mirror::Config::load(&store::app_data_dir().join("mirror.json")) {
+        Some(_) => bucket_shot_list().map_err(|error| format!("bucket shotlist.json: {error}")),
+        None => std::fs::read(store::app_data_dir().join(shots::LOCAL_FILE))
+            .map_err(|error| format!("{}: {error}", shots::LOCAL_FILE)),
+    };
+    match read.and_then(|bytes| shots::parse(&bytes)) {
+        Ok(list) => (Some(list), None),
+        Err(error) => (None, Some(error.replace('\n', " "))),
+    }
+}
+
+/// [`shots::BUCKET_KEY`] through the mirror's `mirror.json` and signer.
+/// Blocking.
+fn bucket_shot_list() -> Result<Vec<u8>, String> {
+    cap_gcs_mirror::Config::load(&store::app_data_dir().join("mirror.json"))
         .ok_or_else(|| "no mirror.json".to_string())
         .and_then(|config| {
             // `Mirror::new`'s default endpoint.
@@ -748,10 +815,6 @@ pub(crate) fn load_shot_list() -> (Option<shots::ShotList>, Option<String>) {
                 Duration::from_secs(10),
             )
         })
-        .inspect_err(|error| tracing::info!(%error, "no shot list from the bucket"));
-    shots::pick(bucket, || {
-        std::fs::read(store::app_data_dir().join(shots::LOCAL_FILE))
-    })
 }
 
 /// A range's value snapped to its step -- [`ui::snap_to_step`] over
@@ -1048,6 +1111,30 @@ impl TeleprompterWindow {
                                 .text_color(Hsla::from(theme.blue_10))
                                 .child(format!("On screen: {on_screen}")),
                         )
+                    })
+                    .when_some(shots.list.progress.as_ref(), |this, progress| {
+                        // What's left, from the film: a tick or an empty box
+                        // per shot and per judging criterion.
+                        this.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(Hsla::from(theme.gray_11))
+                                .child(progress.summary()),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .justify_center()
+                                .gap(px(10.))
+                                .text_size(px(11.))
+                                .text_color(Hsla::from(theme.gray_9))
+                                .children(progress.rows().into_iter().map(|(label, ticked)| {
+                                    let mark = if ticked { '\u{2611}' } else { '\u{2610}' };
+                                    div().child(format!("{mark} {label}"))
+                                })),
+                        )
                     }),
             )
             .child(
@@ -1239,6 +1326,17 @@ impl TeleprompterWindow {
                         cx,
                     ))
                     .child(self.shot_button("retake", "Retake", shots::Action::Retake, live, cx))
+                    .child(
+                        self.pill()
+                            .id("reload")
+                            .text_size(px(11.))
+                            .text_color(Hsla::from(theme.gray_12))
+                            .child("Reload")
+                            .hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.11)))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.read_shot_list(window, cx)),
+                            ),
+                    )
             })
             .when(self.shots.is_none(), |this| {
                 this.child(
