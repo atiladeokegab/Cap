@@ -55,6 +55,7 @@ time since). `take-manifest.json` holds no times.
 
 ### Known limitations
 
+- `editor_edits.rs` (`apps/desktop-gpui/src/editor_edits.rs`): the project's base crop only; a style segment's own crop is not applied, upgrade if those crops become common.
 - `schedule_startup_check` (`apps/desktop-gpui/src/updates.rs`): unused since the fork dropped the startup check (main.rs); delete with the updater if it never returns.
 - `set_paused` (`apps/desktop-gpui/src/window_log.rs`): the resume is seen when the actor acknowledges it, a little after the new segment's epoch, so its first titles read slightly late.
 <!-- fork:end -->
