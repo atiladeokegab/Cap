@@ -93,7 +93,7 @@ fn shots_op(request: &Value) -> Result<Value, String> {
                 continue;
             }
             Some("resume") => {
-                clock.resume(now);
+                clock.resume(Some(now));
                 continue;
             }
             other => return Err(format!("unknown action {other:?}")),
