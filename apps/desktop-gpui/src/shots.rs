@@ -235,10 +235,6 @@ impl Shots {
         }
     }
 
-    pub fn started(&self) -> bool {
-        self.started
-    }
-
     /// The shot a Ready or Countdown cue's action starts, for its card.
     pub fn upcoming(&self) -> Option<&Shot> {
         match self.cue {
