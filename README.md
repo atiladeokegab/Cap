@@ -28,6 +28,25 @@
 
 <img src="https://raw.githubusercontent.com/CapSoftware/Cap/refs/heads/main/apps/web/public/landing-cover.png" alt="Cap app preview">
 
+<!-- fork:start (written by docs/architecture/c4.py) -->
+## This fork
+
+A fork of Cap for recording product demos that are turned into edited films. It adds a teleprompter
+with shot marks (`shots.json`), a foreground-window log (`windows.jsonl`), live upload of each closed
+fragment to S3-compatible storage, and `cap events --json`. Every time it writes is on the take's
+start-gate clock, the one `cursor.json` uses. Upload settings live in a local config file, never in
+this repo.
+
+![C4 context](docs/architecture/c4_context.png)
+![C4 container](docs/architecture/c4_container.png)
+![C4 component](docs/architecture/c4_component.png)
+![C4 code](docs/architecture/c4_code.png)
+
+### Known limitations
+
+- unused since the fork dropped the startup check (main.rs); delete with the updater if it never returns. (`apps/desktop-gpui/src/updates.rs`)
+<!-- fork:end -->
+
 Cap is the open source alternative to Loom. It gives you fast screen recording, polished local editing, instant share links, comments, transcripts, analytics, team workspaces, custom domains, custom S3 storage, and full self-hosting when you need complete control.
 
 Use Cap for product demos, bug reports, onboarding, tutorials, design reviews, engineering walkthroughs, async standups, client updates, and any moment where showing the work is faster than scheduling another call.
