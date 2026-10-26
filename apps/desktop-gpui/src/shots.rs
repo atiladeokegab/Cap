@@ -186,10 +186,9 @@ impl Shots {
         &self.marks
     }
 
-    /// Next starts the shot on screen the first time, then moves on to the
-    /// following one; Retake starts the current shot again. Either way the
-    /// mark is appended and the take's `shots.json` rewritten whole.
-    pub fn mark(&mut self, action: Action, take: &Path, at: (u32, u64)) -> std::io::Result<()> {
+    /// The live take's saved marks, and the shot they leave on screen: a
+    /// teleprompter reopened mid-take picks up where it left off.
+    pub fn open(&mut self, take: &Path) {
         if self.take.as_deref() != Some(take) {
             // A teleprompter reopened mid-take keeps the marks already written.
             self.marks = std::fs::read(take.join(SHOTS_FILE))
@@ -197,8 +196,27 @@ impl Shots {
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok())
                 .unwrap_or_default();
             self.started = !self.marks.is_empty();
+            // The last mark's shot is on screen again (a retake did not move
+            // on); a new, empty take starts at the first shot.
+            self.current = self
+                .marks
+                .last()
+                .and_then(|last| {
+                    self.list
+                        .shots
+                        .iter()
+                        .position(|shot| shot.shot_id == last.shot_id)
+                })
+                .unwrap_or(0);
             self.take = Some(take.to_path_buf());
         }
+    }
+
+    /// Next starts the shot on screen the first time, then moves on to the
+    /// following one; Retake starts the current shot again. Either way the
+    /// mark is appended and the take's `shots.json` rewritten whole.
+    pub fn mark(&mut self, action: Action, take: &Path, at: (u32, u64)) -> std::io::Result<()> {
+        self.open(take);
         if action == Action::Next && self.started {
             if self.current + 1 == self.list.shots.len() {
                 return Ok(());
@@ -273,6 +291,44 @@ mod tests {
         assert_eq!(list.as_deref(), Some("local"));
         assert!(warning.unwrap().starts_with("bucket shotlist.json"));
         assert!(pick(Ok(b"{}".to_vec()), missing).1.is_some());
+    }
+
+    #[test]
+    fn a_reopened_teleprompter_resumes_at_the_last_marked_shot() {
+        let three = || {
+            parse(
+                br#"{"shots": [
+                {"shot_id": "intro", "title": "I", "lines": []},
+                {"shot_id": "demo", "title": "D", "lines": []},
+                {"shot_id": "ask", "title": "A", "lines": []}
+            ]}"#,
+            )
+            .unwrap()
+        };
+        let dir = std::env::temp_dir().join(format!("cap-shots-reopen-{}", std::process::id()));
+        let (take, fresh) = (dir.join("take"), dir.join("fresh"));
+        std::fs::create_dir_all(&take).unwrap();
+        std::fs::create_dir_all(&fresh).unwrap();
+        let mut first = Shots::new(three());
+        for (action, at) in [
+            (Action::Next, 100),
+            (Action::Next, 200),
+            (Action::Retake, 300),
+        ] {
+            first.mark(action, &take, (0, at)).unwrap();
+        }
+        // Reopened twice: Retake re-marks demo, then Next moves on to ask.
+        let mut reopened = Shots::new(three());
+        reopened.mark(Action::Retake, &take, (0, 400)).unwrap();
+        assert_eq!(reopened.current().shot_id, "demo");
+        let mut again = Shots::new(three());
+        again.mark(Action::Next, &take, (0, 500)).unwrap();
+        let ids: Vec<_> = again.marks().iter().map(|m| m.shot_id.as_str()).collect();
+        assert_eq!(ids, ["intro", "demo", "demo", "demo", "ask"]);
+        // A new, empty take starts at the first shot again.
+        again.mark(Action::Next, &fresh, (0, 0)).unwrap();
+        assert_eq!(again.current().shot_id, "intro");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -314,6 +314,13 @@ impl TeleprompterWindow {
                     tracing::warn!(%warning, "shot list");
                 }
                 this.shots = list.map(Shots::new);
+                // Opened mid-take: show the shot the saved marks left on screen.
+                if let (Some(shots), Some((take, _))) = (
+                    this.shots.as_mut(),
+                    RecordingSession::global(cx).read(cx).shot_time(),
+                ) {
+                    shots.open(&take);
+                }
                 this.shots_error = warning;
                 if this.shots.is_some() {
                     crate::hotkeys::set_shot_keys(true, cx);
