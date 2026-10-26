@@ -220,7 +220,9 @@ mod tests {
 
     #[test]
     fn next_starts_then_advances_and_stops_at_the_last_shot() {
-        let take = tempfile::tempdir().unwrap();
+        // Std only: the acceptance driver's crate compiles these tests too.
+        let take = std::env::temp_dir().join(format!("cap-shots-{}", std::process::id()));
+        std::fs::create_dir_all(&take).unwrap();
         let mut shots = Shots::new(list());
         for (action, time) in [
             (Action::Next, 10),
@@ -228,14 +230,15 @@ mod tests {
             (Action::Next, 30),
             (Action::Next, 40),
         ] {
-            shots.mark(action, take.path(), (0, time)).unwrap();
+            shots.mark(action, &take, (0, time)).unwrap();
         }
         let ids: Vec<_> = shots.marks().iter().map(|m| m.shot_id.as_str()).collect();
         assert_eq!(ids, ["intro", "intro", "demo"]);
         assert!(shots.marks()[1].retake);
         let written: Vec<ShotMark> =
-            serde_json::from_slice(&std::fs::read(take.path().join(SHOTS_FILE)).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(take.join(SHOTS_FILE)).unwrap()).unwrap();
         assert_eq!(written, shots.marks());
+        std::fs::remove_dir_all(&take).unwrap();
     }
 
     #[test]
