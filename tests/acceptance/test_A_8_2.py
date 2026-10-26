@@ -239,6 +239,23 @@ def test_a_drag_across_the_screen_makes_no_zoom(driver):
     assert zoom(driver, take.take) == []
 
 
+@pytest.mark.parametrize("held", [False, True], ids=["click_control", "drags"])
+def test_repeated_drags_are_not_local_work(driver, held):
+    take = Take()
+    for start in (5000, 5400, 5800, 6200, 6600, 7000):
+        for dt, x in ((-30, 0.35), (50, 0.50)):
+            take.take["cursor"]["moves"].append(
+                {"time_ms": start + dt, "x": x, "y": 0.5}
+            )
+        for dt, down in ((0, True), (200 if held else 40, False)):
+            take.take["cursor"]["clicks"].append({"time_ms": start + dt, "down": down})
+    segments = zoom(driver, take.take)
+    if held:
+        assert segments == [], segments
+    else:
+        assert len(segments) == 1, "The same presses without dragging are work"
+
+
 def test_zooms_out_when_the_work_moves_away_or_stops_for_2_s(driver):
     take = Take(40.0).clicks(5.0, 9.8, 0.4, box(0.2, 0.2, 0.06))
     take.click(10.0, 0.85, 0.85).click(10.4, 0.1, 0.9)  # the work moves away
@@ -261,6 +278,16 @@ def test_zoom_ins_are_6_s_apart_and_zoomed_time_is_at_most_35_percent(driver):
     assert len(starts) >= 2, "zoom stopped following the work"
     assert all(b - a >= MIN_GAP for a, b in pairwise(starts)), starts
     assert sum(s["end"] - s["start"] for s in segments) <= MAX_SHARE * 44.0
+
+
+def test_six_second_spacing_applies_without_overlap_or_budget_pressure(driver):
+    take = Take(60.0)
+    for start in (2, 7, 12, 17):
+        take.clicks(start, start + 1.8, 0.3, box(0.4, 0.4, 0.04))
+    segments = zoom(driver, take.take)
+    starts = sorted(s["start"] for s in segments)
+    assert len(starts) >= 2, "Separated work must still receive zooms"
+    assert all(b - a >= MIN_GAP for a, b in pairwise(starts)), starts
 
 
 def test_depth_is_1_4_to_2_0_and_tighter_on_a_smaller_region(driver):
