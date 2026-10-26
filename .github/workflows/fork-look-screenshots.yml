@@ -62,12 +62,12 @@ jobs:
           if (-not $exe) { throw "Cap.exe not found after install" }
           "CAP_EXE=$($exe.FullName)" | Add-Content $env:GITHUB_ENV
 
-      - name: Seed settings (light theme, onboarding done, editor after recording)
+      - name: Seed settings (light theme, onboarding done, Studio mode, editor after recording)
         shell: pwsh
         run: |
           $data = Join-Path $env:RUNNER_TEMP "cap-data"
           New-Item -ItemType Directory -Force -Path $data, (Join-Path $env:RUNNER_TEMP "shots") | Out-Null
-          '{"general_settings":{"theme":"light","hasCompletedStartup":true,"hasCompletedOnboarding":true,"postStudioRecordingBehaviour":"openEditor"},"recording_start_safety":{"confirmBeforeRecordingWithoutMicrophone":false}}' |
+          '{"general_settings":{"theme":"light","hasCompletedStartup":true,"hasCompletedOnboarding":true,"postStudioRecordingBehaviour":"openEditor"},"recording_start_safety":{"confirmBeforeRecordingWithoutMicrophone":false},"recording_settings":{"mode":"studio"}}' |
             Set-Content -Encoding utf8NoBOM (Join-Path $data "store")
           "CAP_GPUI_APP_DATA_DIR=$data" | Add-Content $env:GITHUB_ENV
           "CAP_GPUI_RECORDINGS_DIR=$(Join-Path $data 'recordings')" | Add-Content $env:GITHUB_ENV
@@ -95,7 +95,7 @@ jobs:
           Shot "start-screen"
           Stop-Cap
 
-          # 2. The bottom capture bar: the display overlay, left up.
+          # 2. The bottom capture bar: the display overlay in Studio mode, ready to record.
           $env:CAP_GPUI_AUTO_OVERLAY = "display"
           Start-Process -FilePath $env:CAP_EXE
           Start-Sleep 15
