@@ -63,7 +63,7 @@ test("the GPUI app keeps the identity every existing install updates into", () =
 		gpuiConfig.plugins["deep-link"],
 		tauriConfig.plugins["deep-link"],
 	);
-	assert.equal(gpuiConfig.bundle.createUpdaterArtifacts, true);
+	assert.equal(gpuiConfig.bundle.createUpdaterArtifacts, false);
 });
 
 test("the GPUI bundle takes over the identity the Tauri app shipped with", () => {
