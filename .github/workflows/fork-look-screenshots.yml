@@ -9,6 +9,11 @@ name: "fork-look-screenshots"
 
 on:
   workflow_dispatch:
+  # Temporary: GitHub cannot dispatch a workflow that is not on the default
+  # branch yet, so this one push runs it once; the next commit removes it.
+  push:
+    branches: [task/T-811]
+    paths: [.github/workflows/fork-look-screenshots.yml]
 
 # The called release workflow asks for contents: write; a caller cannot grant
 # less than its callee requests.
