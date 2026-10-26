@@ -10,9 +10,12 @@ name: Recording fixture (Windows)
 #
 # The take is recorded by the cap-verify recording oracle
 # (crates/verify/tests/recording.rs), which writes <scratch>/recording.cap and
-# keeps it with CAP_VERIFY_KEEP=1. No bucket, key or host appears here: the
-# mirror step (added once the upload mirror merges) reads them from an Actions
-# secret.
+# keeps it with CAP_VERIFY_KEEP=1. The fork steps run only on a ref that has
+# their code (an integration branch): the window log polls the real foreground
+# window during the take, the teleprompter's shot logic writes shots.json into
+# the take, `cap events` reads it back, and the upload mirror sends it to the
+# bucket. No bucket, key or host appears here: the mirror reads its config from
+# the CAP_MIRROR_CONFIG Actions secret and is skipped without it.
 on:
   workflow_dispatch:
     inputs:
@@ -44,6 +47,7 @@ jobs:
       CAP_VERIFY_HOST: github-hosted
       CAP_VERIFY_STIMULUS_AUDIO: "0"
       CLICKS_DIR: ${{ github.workspace }}/clicks
+      FORK_DIR: ${{ github.workspace }}/fork
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,6 +64,24 @@ jobs:
         run: |
           cargo build --locked --profile ci-verify -p cap-verify-stimulus
           cargo test --locked --profile ci-verify -p cap-verify --test recording --no-run
+
+      # Fork tools, each only where its code is on this ref.
+      - name: Build fork tools
+        shell: bash
+        run: |
+          mkdir -p "$FORK_DIR"
+          if [ -f apps/desktop-gpui/src/window_log.rs ]; then
+            cargo build --locked --profile ci-verify -p cap-verify-stimulus --features window-log --bin window-log-probe
+            echo "FORK_WINDOW_LOG=1" >> "$GITHUB_ENV"
+          fi
+          if [ -f apps/desktop-gpui/gcs-mirror/src/bin/cap-driver.rs ]; then
+            cargo build --locked --release --manifest-path apps/desktop-gpui/Cargo.toml -p cap-gcs-mirror --bin cap-driver
+            echo "FORK_DRIVER=$(cd apps/desktop-gpui/target/release && pwd)/cap-driver.exe" >> "$GITHUB_ENV"
+          fi
+          if [ -f apps/cli/src/events.rs ]; then
+            cargo build --locked --profile ci-verify -p cap
+            echo "FORK_EVENTS=1" >> "$GITHUB_ENV"
+          fi
 
       # Real input, not a synthetic event: user32 SendInput clicks the lower left
       # of the primary display, inside the fullscreen stimulus, every 500 ms
@@ -110,6 +132,17 @@ jobs:
           Set-Content (Join-Path $env:CLICKS_DIR 'clicker.ps1') $script
           Start-Process pwsh -ArgumentList '-NoProfile', '-File', (Join-Path $env:CLICKS_DIR 'clicker.ps1') -WindowStyle Hidden
 
+      # The fork's window log (window_log.rs, compiled in unchanged) on the real
+      # desktop for the whole take, into fork/windows.jsonl. Its clock starts at
+      # fork/window-log-epoch.json (unix ms), not the take's start gate: the take
+      # is recorded by cap-verify, not the app.
+      - name: Start window log
+        if: env.FORK_WINDOW_LOG == '1'
+        shell: pwsh
+        run: |
+          $probe = Get-ChildItem target -Recurse -Filter window-log-probe.exe | Select-Object -First 1
+          Start-Process $probe.FullName -ArgumentList $env:FORK_DIR, (Join-Path $env:CLICKS_DIR 'stop') -WindowStyle Hidden
+
       - name: Record studio take
         shell: bash
         run: cargo test --locked --profile ci-verify -p cap-verify --test recording -- --nocapture
@@ -122,6 +155,59 @@ jobs:
           sleep 1
           echo "clicks sent: $(wc -l < "$CLICKS_DIR/clicks.jsonl" 2>/dev/null || echo 0)"
           find "$CAP_VERIFY_SCRATCH" -path '*recording.cap/*' -type f | head -50
+          echo "window log lines: $(wc -l < "$FORK_DIR/windows.jsonl" 2>/dev/null || echo 0)"
+
+      # The teleprompter's shot logic (shots.rs through cap-driver) on the real
+      # take folder: Next, Retake, Next on an injected clock, as a presenter would
+      # press them, so the take gets the shots.json the film pipeline reads.
+      - name: Shot marks
+        if: env.FORK_DRIVER != ''
+        shell: bash
+        run: |
+          take=$(find "$CAP_VERIFY_SCRATCH" -type d -name recording.cap | head -1)
+          jq -n --arg take "$take" '{op: "shots", take: $take, epoch_ms: 0,
+            shotlist: {shots: [
+              {shot_id: "intro", title: "Intro", lines: [{sentence_id: "s1", text: "This is the fixture take."}]},
+              {shot_id: "demo", title: "Demo", lines: [{sentence_id: "s2", text: "Each click flips the corner."}]},
+              {shot_id: "ask", title: "Ask", lines: [{sentence_id: "s3", text: "That is the whole take."}]}]},
+            script: [{action: "next", at_ms: 2000}, {action: "retake", at_ms: 3000}, {action: "next", at_ms: 4000}]}' \
+            | "$FORK_DRIVER" | tee "$FORK_DIR/shots-result.json"
+          cat "$take/shots.json"
+
+      - name: cap events
+        if: env.FORK_EVENTS == '1'
+        shell: bash
+        run: |
+          take=$(find "$CAP_VERIFY_SCRATCH" -type d -name recording.cap | head -1)
+          cap=$(find target -name cap.exe -path '*ci-verify*' | head -1)
+          "$cap" events "$take" --json > "$FORK_DIR/events.json"
+          jq 'length' "$FORK_DIR/events.json"
+
+      # Uploads the finished take as the mirror does at stop, under
+      # takes/ci-<run>-<attempt>/. The config comes only from the secret, is
+      # written to the runner's temp folder and never printed.
+      - name: Mirror the take
+        if: env.FORK_DRIVER != ''
+        shell: bash
+        env:
+          CAP_MIRROR_CONFIG: ${{ secrets.CAP_MIRROR_CONFIG }}
+        run: |
+          if [ -z "$CAP_MIRROR_CONFIG" ]; then
+            echo "CAP_MIRROR_CONFIG is not set; mirror skipped"
+            exit 0
+          fi
+          config="$RUNNER_TEMP/mirror.json"
+          printf '%s' "$CAP_MIRROR_CONFIG" \
+            | jq --arg p "takes/ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" '.prefix = $p' > "$config"
+          take=$(find "$CAP_VERIFY_SCRATCH" -type d -name recording.cap | head -1)
+          outbox="$RUNNER_TEMP/outbox"
+          jq -n --arg c "$config" --arg t "$take" --arg o "$outbox" '{op: "scan", config: $c, take: $t, outbox: $o}' \
+            | "$FORK_DRIVER"
+          jq -n --arg c "$config" --arg t "$take" --arg o "$outbox" --argjson now "$(date +%s%3N)" \
+            '{op: "stop", config: $c, take: $t, outbox: $o, stopped_at_unix_ms: $now, drain_timeout_ms: 120000}' \
+            | "$FORK_DRIVER" | tee "$FORK_DIR/mirror-result.json"
+          echo "uploaded under takes/ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/"
+          rm -f "$config"
 
       - name: Upload take
         if: always()
@@ -132,5 +218,6 @@ jobs:
             ${{ github.workspace }}/verify-scratch/**/recording.cap
             ${{ github.workspace }}/verify-scratch/**/*.clicks.jsonl
             ${{ github.workspace }}/clicks/clicks.jsonl
+            ${{ github.workspace }}/fork
             ${{ github.workspace }}/verify-report
           if-no-files-found: error
