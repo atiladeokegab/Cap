@@ -444,6 +444,25 @@ fn reader_start_time(keyframe_index: Option<&Arc<KeyframeIndex>>, requested_time
         .unwrap_or_else(|| cm::Time::with_secs(requested_time as f64, 100))
 }
 
+/// Probe only: step timings of reader creation on stderr.
+fn probe_step(step: &str, started: std::time::Instant) {
+    if std::env::var_os("CAP_PROBE_AVF_TIMING").is_some() {
+        eprintln!(
+            "avf-step {step} {:.1} ms thread_qos={}",
+            started.elapsed().as_secs_f64() * 1000.0,
+            current_qos()
+        );
+    }
+}
+
+fn current_qos() -> u32 {
+    unsafe extern "C" {
+        fn qos_class_self() -> u32;
+    }
+    // SAFETY: qos_class_self reads the calling thread's QoS class.
+    unsafe { qos_class_self() }
+}
+
 pub struct AVAssetReaderDecoder {
     path: PathBuf,
     pixel_format: cv::PixelFormat,
@@ -465,7 +484,10 @@ impl AVAssetReaderDecoder {
         tokio_handle: TokioHandle,
         start_time: f32,
     ) -> Result<Self, String> {
-        let keyframe_index = match KeyframeIndex::build(&path) {
+        let probe = std::time::Instant::now();
+        let built = KeyframeIndex::build(&path);
+        probe_step("keyframe_index", probe);
+        let keyframe_index = match built {
             Ok(index) => Some(Arc::new(index)),
             Err(e) => {
                 tracing::warn!(
@@ -604,6 +626,7 @@ impl AVAssetReaderDecoder {
             )));
         }
 
+        let probe = std::time::Instant::now();
         let asset = av::UrlAsset::with_url(
             &ns::Url::with_fs_path_str(
                 path.to_str()
@@ -619,9 +642,13 @@ impl AVAssetReaderDecoder {
 
         reader.set_time_range(time_range);
 
+        probe_step("asset_and_reader", probe);
+        let probe = std::time::Instant::now();
         let tracks = handle
             .block_on(asset.load_tracks_with_media_type(av::MediaType::video()))
             .map_err(|e| format!("asset.load_tracks_with_media_type: {e}"))?;
+        probe_step("load_tracks", probe);
+        let probe = std::time::Instant::now();
 
         let track = tracks.get(0).map_err(|e| e.to_string())?;
 
@@ -648,9 +675,12 @@ impl AVAssetReaderDecoder {
             .add_output(&reader_track_output)
             .map_err(|e| format!("reader.add_output: {e}"))?;
 
+        probe_step("track_output", probe);
+        let probe = std::time::Instant::now();
         reader
             .start_reading()
             .map_err(|e| format!("reader.start_reading: {e}"))?;
+        probe_step("start_reading", probe);
 
         Ok(ReaderSource::Native {
             track_output: reader_track_output,

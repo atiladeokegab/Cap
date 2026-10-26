@@ -24,17 +24,16 @@ one() { # <label> <iteration>
     "$bin" play_from_middle --exact --test-threads=1 >"$out/$1-$2.log" 2>&1
   echo "$1 $2 exit=$?" >>"$out/exits.txt"
 }
+export CAP_PROBE_AVF_TIMING=1
 # Fixture generation, once.
 one warmup 0
-for i in $(seq 20); do one idle "$i"; done
+for i in $(seq 5); do one idle "$i"; done
 burn=()
 for _ in $(seq 12); do yes >/dev/null & burn+=($!); done
-for i in $(seq 20); do one cpu "$i"; done
+for i in $(seq 5); do one cpu "$i"; done
 kill "${burn[@]}"
-for i in $(seq 20); do
-  for k in 1 2 3 4 5 6 7; do one vtload "$i.$k" & done
-  one vt "$i"
-  wait
-done
+grep -h "avf-step" "$out"/idle-*.log | awk '{s[$2]+=$3; n[$2]++} END {for (k in s) printf "idle %s avg %.1f ms n=%d\n", k, s[k]/n[k], n[k]}'
+grep -h "avf-step" "$out"/cpu-*.log | awk '{s[$2]+=$3; n[$2]++; if ($3>m[$2]) m[$2]=$3} END {for (k in s) printf "cpu %s avg %.1f ms max %.1f n=%d\n", k, s[k]/n[k], m[k], n[k]}'
+grep -h "avf-step" "$out"/cpu-*.log | head -12
 grep -c . "$out"/*.txt
 grep -v "exit=0" "$out/exits.txt" | head -40
