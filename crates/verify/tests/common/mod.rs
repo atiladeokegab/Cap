@@ -1056,11 +1056,16 @@ impl Player {
             if ms >= min
                 && let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path)
             {
+                let end = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64();
                 let _ = writeln!(
                     file,
-                    "{} clip{clip} t={time:.3} seek={seek} ms={ms:.1} ok={}",
+                    "{} clip{clip} t={time:.3} seek={seek} ms={ms:.1} ok={} end={end:.3} pid={}",
                     self.label,
-                    frames.is_some()
+                    frames.is_some(),
+                    std::process::id()
                 );
             }
         }

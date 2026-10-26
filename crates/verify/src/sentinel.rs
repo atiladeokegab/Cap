@@ -64,6 +64,11 @@ fn state() -> &'static State {
         let _ = std::thread::Builder::new()
             .name("cap-verify-sentinel".into())
             .spawn(move || run(log));
+        if let Some(path) = std::env::var_os("CAP_VERIFY_PLAIN_SENTINEL") {
+            let _ = std::thread::Builder::new()
+                .name("cap-verify-plain-sentinel".into())
+                .spawn(move || plain(path.into()));
+        }
         state
     })
 }
@@ -102,9 +107,32 @@ fn run(mut log: Option<std::fs::File>) {
                 let _ = writeln!(
                     file,
                     "{}",
-                    serde_json::json!({ "at": at, "gap_ms": gap_ms })
+                    serde_json::json!({ "at": at, "gap_ms": gap_ms, "end": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64() })
                 );
             }
+        }
+    }
+}
+
+/// Probe only: a normal-priority sentinel, appending wake gaps of 50 ms or
+/// more with their wall-clock end time.
+fn plain(path: std::path::PathBuf) {
+    let mut file = match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        Ok(file) => file,
+        Err(_) => return,
+    };
+    let mut last = Instant::now();
+    loop {
+        std::thread::sleep(PERIOD);
+        let now = Instant::now();
+        let gap_ms = now.duration_since(last).as_secs_f64() * 1000.0;
+        last = now;
+        if gap_ms >= RECORD_GAP_MS {
+            let end = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64();
+            let _ = writeln!(file, "plain pid={} gap_ms={gap_ms:.1} end={end:.3}", std::process::id());
         }
     }
 }

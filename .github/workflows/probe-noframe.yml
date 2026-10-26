@@ -25,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rep: [1, 2, 3]
+        rep: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,18 +44,15 @@ jobs:
       - name: Build
         shell: bash
         run: scripts/verify/run.sh fast --no-run
-      - name: Solo playback latency
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/lat"
-          for i in 1 2 3; do
-            CAP_VERIFY_CASE='playback/vfr-holds/*,playback/basic/full/*' \
-              CAP_VERIFY_LATENCY_FILE="$RUNNER_TEMP/lat/solo-$i.txt" scripts/verify/run.sh fast --suites playback || true
-          done
       - name: Test under load
         shell: bash
         run: |
-          CAP_VERIFY_LATENCY_FILE="$RUNNER_TEMP/lat/load.txt" CAP_VERIFY_LATENCY_MIN_MS=100 scripts/verify/run.sh fast || true
+          mkdir -p "$RUNNER_TEMP/lat"
+          bash scripts/verify/probe-sampler.sh "$RUNNER_TEMP/lat" &
+          CAP_VERIFY_PLAIN_SENTINEL="$RUNNER_TEMP/lat/plain.txt" CAP_VERIFY_LATENCY_FILE="$RUNNER_TEMP/lat/load.txt" CAP_VERIFY_LATENCY_MIN_MS=100 scripts/verify/run.sh fast || true
+          cp "$CAP_VERIFY_REPORT_DIR"/sentinel-*.log "$RUNNER_TEMP/lat/" 2>/dev/null || true
+          pkill -f probe-sampler.sh || true
+          pkill top || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
