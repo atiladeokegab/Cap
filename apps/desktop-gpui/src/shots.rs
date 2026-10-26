@@ -62,6 +62,13 @@ pub struct Shot {
     #[serde(default, deserialize_with = "present_string")]
     pub on_screen: Option<String>,
     pub lines: Vec<Line>,
+    /// `"none"` turns generated zoom off over this shot.
+    #[serde(
+        default,
+        deserialize_with = "present_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub zoom: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -161,6 +168,51 @@ pub enum Action {
     Retake,
 }
 
+/// Between shots: what the teleprompter shows over the shot's lines.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Cue {
+    #[default]
+    Reading,
+    /// Scrolled past the shot's last line.
+    Stop,
+    /// Recording paused: the card of the shot the action starts, and Go.
+    Ready(Action),
+    /// Go pressed: 3-2-1, then the recording resumes and the action marks.
+    Countdown(Action),
+}
+
+/// Go's 3-2-1, one count a second.
+pub const COUNTDOWN_MS: u64 = 3000;
+
+/// The card's title against the script's text size: large, read at a glance.
+pub const CARD_SCALE: f32 = 1.5;
+
+/// The count Go's 3-2-1 shows `elapsed_ms` after Go; `None` once it is over.
+pub fn countdown(elapsed_ms: u64) -> Option<u64> {
+    (elapsed_ms < COUNTDOWN_MS).then(|| (COUNTDOWN_MS - elapsed_ms).div_ceil(1000))
+}
+
+/// Where `shots.json` puts each `zoom: none` shot: `(segment, from_ms,
+/// to_ms)`, up to the next mark in its segment or the segment's end (`None`).
+pub fn zoomless(list: &ShotList, marks: &[ShotMark]) -> Vec<(u32, u64, Option<u64>)> {
+    marks
+        .iter()
+        .enumerate()
+        .filter(|(_, mark)| {
+            list.shots
+                .iter()
+                .any(|shot| shot.shot_id == mark.shot_id && shot.zoom.as_deref() == Some("none"))
+        })
+        .map(|(index, mark)| {
+            let to = marks
+                .get(index + 1)
+                .filter(|next| next.segment == mark.segment)
+                .map(|next| next.time_ms);
+            (mark.segment, mark.time_ms, to)
+        })
+        .collect()
+}
+
 /// The loaded list, the shot on screen, and the marks written into the take.
 pub struct Shots {
     pub list: ShotList,
@@ -168,6 +220,7 @@ pub struct Shots {
     started: bool,
     take: Option<PathBuf>,
     marks: Vec<ShotMark>,
+    pub cue: Cue,
 }
 
 impl Shots {
@@ -178,7 +231,56 @@ impl Shots {
             started: false,
             take: None,
             marks: Vec::new(),
+            cue: Cue::Reading,
         }
+    }
+
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
+    /// The shot a Ready or Countdown cue's action starts, for its card.
+    pub fn upcoming(&self) -> Option<&Shot> {
+        match self.cue {
+            Cue::Ready(Action::Next) | Cue::Countdown(Action::Next) => {
+                self.list.shots.get(self.current + 1)
+            }
+            Cue::Ready(Action::Retake) | Cue::Countdown(Action::Retake) => Some(self.current()),
+            _ => None,
+        }
+    }
+
+    /// The teleprompter scrolled past the shot's last line.
+    pub fn ended(&mut self) {
+        if self.started && self.cue == Cue::Reading {
+            self.cue = Cue::Stop;
+        }
+    }
+
+    /// Next shot on a started take: stop between shots on the next one's card
+    /// (the caller pauses the recording); Retake on a card switches it to
+    /// this shot's. False when the press marks at once instead: the take's
+    /// first shot, the last shot, or a Retake while recording.
+    pub fn hold(&mut self, action: Action) -> bool {
+        let hold = match (action, self.cue) {
+            // A press during the 3-2-1 changes nothing.
+            (_, Cue::Countdown(_)) => return true,
+            (Action::Next, _) => self.started && self.current + 1 < self.list.shots.len(),
+            (Action::Retake, cue) => matches!(cue, Cue::Ready(_)),
+        };
+        if hold {
+            self.cue = Cue::Ready(action);
+        }
+        hold
+    }
+
+    /// Go on a Ready card: the action the resume will mark.
+    pub fn go(&mut self) -> Option<Action> {
+        let Cue::Ready(action) = self.cue else {
+            return None;
+        };
+        self.cue = Cue::Countdown(action);
+        Some(action)
     }
 
     pub fn current(&self) -> &Shot {
@@ -230,6 +332,7 @@ impl Shots {
                 self.started = false;
                 self.take = None;
                 self.marks.clear();
+                self.cue = Cue::Reading;
             }
         }
     }
@@ -246,6 +349,7 @@ impl Shots {
             self.current += 1;
         }
         self.started = true;
+        self.cue = Cue::Reading;
         let (segment, time_ms) = at;
         self.marks.push(ShotMark {
             shot_id: self.current().shot_id.clone(),
@@ -397,6 +501,70 @@ mod tests {
             serde_json::from_slice(&std::fs::read(take.join(SHOTS_FILE)).unwrap()).unwrap();
         assert_eq!(written, shots.marks());
         std::fs::remove_dir_all(&take).unwrap();
+    }
+
+    #[test]
+    fn next_shot_holds_on_the_next_card_and_go_marks_at_the_resume() {
+        let take = std::env::temp_dir().join(format!("cap-shots-cue-{}", std::process::id()));
+        std::fs::create_dir_all(&take).unwrap();
+        let mut shots = Shots::new(list());
+        // The take's first press starts shot 1 at once; nothing to stop yet.
+        shots.ended();
+        assert_eq!(shots.cue, Cue::Reading);
+        assert!(!shots.hold(Action::Next));
+        shots.mark(Action::Next, &take, (0, 100)).unwrap();
+        shots.ended();
+        assert_eq!(shots.cue, Cue::Stop);
+        assert!(shots.hold(Action::Next));
+        assert_eq!(shots.upcoming().unwrap().shot_id, "demo");
+        // Retake on the card: this shot's card instead, and back.
+        assert!(shots.hold(Action::Retake));
+        assert_eq!(shots.upcoming().unwrap().shot_id, "intro");
+        assert!(shots.hold(Action::Next));
+        assert_eq!(shots.go(), Some(Action::Next));
+        assert!(shots.hold(Action::Retake));
+        assert_eq!(shots.cue, Cue::Countdown(Action::Next));
+        assert_eq!(shots.go(), None);
+        let shown: Vec<_> = [0, 999, 1000, 2000, 2999, 3000].map(countdown).to_vec();
+        assert_eq!(shown, [Some(3), Some(3), Some(2), Some(1), Some(1), None]);
+        shots.mark(Action::Next, &take, (1, 0)).unwrap();
+        assert_eq!(
+            (shots.cue, shots.current().shot_id.as_str()),
+            (Cue::Reading, "demo")
+        );
+        // Recording: Retake marks at once; the last shot has no next card.
+        assert!(!shots.hold(Action::Retake));
+        assert!(!shots.hold(Action::Next));
+        assert_eq!(shots.upcoming(), None);
+        std::fs::remove_dir_all(&take).unwrap();
+    }
+
+    #[test]
+    fn zoomless_spans_run_from_the_mark_to_the_next_in_the_segment() {
+        let list = parse(
+            br#"{"shots": [
+                {"shot_id": "intro", "title": "I", "lines": [], "zoom": "none"},
+                {"shot_id": "demo", "title": "D", "lines": []}
+            ]}"#,
+        )
+        .unwrap();
+        assert!(
+            parse(br#"{"shots": [{"shot_id": "a", "title": "x", "lines": [], "zoom": null}]}"#)
+                .is_err()
+        );
+        let mark = |shot_id: &str, segment, time_ms| ShotMark {
+            shot_id: shot_id.into(),
+            segment,
+            time_ms,
+            retake: false,
+        };
+        let marks = [
+            mark("intro", 0, 100),
+            mark("demo", 0, 900),
+            mark("intro", 1, 0),
+            mark("demo", 2, 0),
+        ];
+        assert_eq!(zoomless(&list, &marks), [(0, 100, Some(900)), (1, 0, None)]);
     }
 
     #[test]
