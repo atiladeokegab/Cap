@@ -29,7 +29,11 @@ def test_bounded_stop_freezes_every_input_and_restart_needs_no_originals(mirror)
     assert first_puts[0][0].endswith("/stop.json")
     stop = json.loads(first_puts[0][1])
     assert stop["stopped_at_unix_ms"] == 1793016000000
-    assert set(stop["expected_files"]) == set(before)
+    expected = {item["path"]: item for item in stop["expected_files"]}
+    assert set(expected) == set(before)
+    for relative, body in before.items():
+        assert expected[relative]["size"] == len(body)
+        assert expected[relative]["sha256"] == digest(body)
     assert first_puts[-1][0].endswith("/take-manifest.json")
     assert (mirror.outbox / "uploaded.jsonl").is_file()
     manifest = json.loads(first_puts[-1][1])

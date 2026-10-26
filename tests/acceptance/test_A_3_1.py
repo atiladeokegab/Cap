@@ -9,8 +9,11 @@ def test_shotlist_loads_content_and_malformed_input_falls_back(driver, xml_serve
         "shots", shotlist=good, epoch_ms=50000, elapsed_offset_ms=9000, script=[]
     )
     assert result["mode"] == "shots"
-    for field in ("title", "on_screen", "lines"):
+    for field in ("title", "on_screen"):
         assert result["current"][field] == good["shots"][0][field]
+    assert result["current"]["lines"] == [
+        line["text"] for line in good["shots"][0]["lines"]
+    ]
     xml_server.objects["/acceptance-fixture/shotlist.json"] = json.dumps(good).encode()
     fetched = driver(
         "shots",

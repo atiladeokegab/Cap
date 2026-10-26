@@ -274,11 +274,11 @@ def create_take(root):
             ],
             "cursors": {
                 "0": {
-                    "image_path": "content/cursors/arrow.png",
+                    "imagePath": "content/cursors/arrow.png",
                     "hotspot": {"x": 0, "y": 0},
                 }
             },
-            "status": "needsRemux",
+            "status": {"status": "NeedsRemux"},
         },
     )
     write_json(root / "project-config.json", {})
@@ -376,8 +376,7 @@ def shotlist():
                 "shot_id": "intro",
                 "title": "Introduce it",
                 "on_screen": "The product",
-                "lines": ["Ship clearly."],
-                "sentence_ids": ["s1"],
+                "lines": [{"sentence_id": "s1", "text": "Ship clearly."}],
             }
         ]
     }
