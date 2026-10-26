@@ -3,7 +3,9 @@ name: Recording fixture (Windows)
 # The fork's real-Windows fixture for the film pipeline (tests/sync and ingest
 # there): one short studio take of cap-verify-stimulus, recorded through Cap's
 # real Studio pipeline on a GitHub-hosted windows-2022 runner while a script
-# clicks the stimulus with SendInput, kept as an artifact. Dispatch only: the
+# clicks the stimulus with SendInput, kept as an artifact. Each click flips a
+# corner patch on the stimulus, logged with its host time and the time the
+# changed picture was presented in <stimulus log>.clicks.jsonl. Dispatch only: the
 # upstream PR/nightly matrix runs on Blacksmith runners this fork does not have.
 #
 # The take is recorded by the cap-verify recording oracle
@@ -117,6 +119,7 @@ jobs:
           name: recording-fixture-windows-2022
           path: |
             ${{ github.workspace }}/verify-scratch/**/recording.cap
+            ${{ github.workspace }}/verify-scratch/**/*.clicks.jsonl
             ${{ github.workspace }}/clicks/clicks.jsonl
             ${{ github.workspace }}/verify-report
           if-no-files-found: error

@@ -40,7 +40,7 @@ mod app {
     use winit::{
         application::ApplicationHandler,
         dpi::{LogicalPosition, LogicalSize},
-        event::{StartCause, WindowEvent},
+        event::{ElementState, StartCause, WindowEvent},
         event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
         window::{Fullscreen, Window, WindowId, WindowLevel},
     };
@@ -125,6 +125,8 @@ mod app {
             thread: sched::current_thread(),
             wake: (String::new(), None),
             presented_at: None,
+            clicks: 0,
+            click_log: File::create(log_path.with_extension("clicks.jsonl")).ok(),
         };
         let observer = start_observer(app.log.clone());
         let (qos, realtime) = raise_priority(app.spec.fps);
@@ -351,6 +353,10 @@ mod app {
         thread: u32,
         wake: (String, Option<i64>),
         presented_at: Option<(u32, Instant)>,
+        /// Real clicks on the window so far; each one flips the corner patch.
+        clicks: u32,
+        /// `<log>.clicks.jsonl`, apart from the event log so its readers never meet an unknown event.
+        click_log: Option<File>,
     }
 
     /// Hosted runners start jobs at utility QoS (scheduler base priority 20)
@@ -415,6 +421,7 @@ mod app {
                 return;
             }
             let busy = self.spec.busy;
+            let clicks = self.clicks;
             let presented = canvas::present(surface, w, h, |bytes| {
                 let (w, h) = (w as usize, h as usize);
                 let band = if busy { h / 8 } else { 0 };
@@ -428,6 +435,18 @@ mod app {
                     stride,
                     PixelOrder::Bgra,
                 );
+                // A corner patch, white after odd clicks and black after even ones, so each
+                // click visibly changes the picture; the centred code and the key-colour
+                // extent the oracle locates it by are unaffected.
+                if clicks > 0 {
+                    let v = if clicks % 2 == 1 { 255 } else { 0 };
+                    let side = ((h - 2 * band) / 12).min(w);
+                    for row in bytes[band * stride..].chunks_exact_mut(stride).take(side) {
+                        for px in row[..side * 4].chunks_exact_mut(4) {
+                            px.copy_from_slice(&[v, v, v, 255]);
+                        }
+                    }
+                }
                 if band > 0 {
                     noise_band(&mut bytes[..band * stride], w, band, index, salt << 1);
                     noise_band(
@@ -689,6 +708,23 @@ mod app {
         ) {
             match event {
                 WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    ..
+                } => {
+                    let host = host_now();
+                    self.clicks += 1;
+                    let index = self.shown.unwrap_or(0);
+                    self.draw(index, u64::from(self.idle_tick));
+                    let presented = host_now();
+                    if let Some(f) = self.click_log.as_mut() {
+                        let line = serde_json::json!({
+                            "count": self.clicks, "host": host, "presented": presented, "index": index,
+                        });
+                        let _ = writeln!(f, "{line}");
+                        let _ = f.flush();
+                    }
+                }
                 WindowEvent::Resized(size) => {
                     self.size = (size.width, size.height);
                     if let Some(window) = &self.window {
