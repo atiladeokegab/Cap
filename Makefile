@@ -6,9 +6,16 @@ GPUI := apps/desktop-gpui
 TOOLCHAIN := 1.95.0
 NATIVE_LIBS := $(CURDIR)/target/native-deps/lib:$(CURDIR)/target/debug
 
-.PHONY: check setup
+.PHONY: check setup driver
 
-check:
+# The test-only mirror adapter tests/acceptance drives (CAP_ACCEPTANCE_DRIVER).
+driver:
+	cd $(GPUI) && cargo +$(TOOLCHAIN) build --offline --locked -p cap-gcs-mirror --bin cap-driver
+	mkdir -p target/acceptance
+	cp $(GPUI)/target/debug/cap-driver target/acceptance/cap-driver
+
+check: driver
+	cd $(GPUI) && cargo +$(TOOLCHAIN) test --offline --locked -p cap-gcs-mirror
 	cd $(GPUI) && LD_LIBRARY_PATH="$(NATIVE_LIBS)" xvfb-run -a --server-args="-screen 0 1920x1080x24 -noreset" \
 		cargo +$(TOOLCHAIN) test --offline --locked --bin cap-gpui
 	uv run --no-project --with pytest pytest tests/acceptance -q
