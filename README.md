@@ -32,14 +32,21 @@
 ## This fork
 
 A fork of Cap for recording product demos that a film pipeline turns into edited films. The desktop
-app adds a shot list in the teleprompter, read from the bucket (or a local file), with Next shot and
-Retake on global hotkeys that write shot marks to the take's `shots.json`; a foreground-window log on
-Windows (`windows.jsonl`); an upload mirror that streams each studio take to S3-compatible storage
-while it records, with `take-manifest.json` last; and a light restyle. The CLI adds
-`cap events <take> --json`. Every time the fork writes is on the take's start-gate clock, the one
-`cursor.json` uses. GitHub Actions builds an unsigned Windows installer and records a real Windows
-fixture take. Upload settings live in a local `mirror.json` in the app data folder, never in this
-repo.
+app adds a shot list in the teleprompter, read from object storage (or a local file), with Next shot
+on Ctrl+Alt+N and Retake on Ctrl+Alt+R (Control+Option on macOS) writing shot marks to the take's
+`shots.json`. Those two global chords are registered only while the teleprompter shows a shot list,
+and a chord you have already bound to something else stays yours. It also adds a foreground-window
+log on Windows (`windows.jsonl`), an upload mirror that streams each studio take to S3-compatible
+storage while it records, with `take-manifest.json` last, and a light restyle. The CLI adds
+`cap events <take> --json`. GitHub Actions builds an unsigned Windows installer and records a real
+Windows fixture take. Upload settings live in a local `mirror.json` in the app data folder, never in
+this repo.
+
+Clocks: `shots.json` and `windows.jsonl` write `time_ms` from the segment's start-gate epoch (the
+gate's armed instant for segment 0, each resume for later segments), the clock `cursor.json` uses;
+`cap events` reports cursor and key events on that same clock. `stop.json` writes
+`stopped_at_unix_ms`, wall-clock Unix milliseconds (the gate's armed wall time plus the monotonic
+time since). `take-manifest.json` holds no times.
 
 ![C4 context](docs/architecture/c4_context.png)
 ![C4 container](docs/architecture/c4_container.png)
@@ -48,8 +55,8 @@ repo.
 
 ### Known limitations
 
-- unused since the fork dropped the startup check (main.rs); delete with the updater if it never returns. (`apps/desktop-gpui/src/updates.rs`, `schedule_startup_check`)
-- the resume is seen when the actor acknowledges it, a little after the new segment's epoch, so its first titles read slightly late. (`apps/desktop-gpui/src/window_log.rs`, `set_paused`)
+- `schedule_startup_check` (`apps/desktop-gpui/src/updates.rs`): unused since the fork dropped the startup check (main.rs); delete with the updater if it never returns.
+- `set_paused` (`apps/desktop-gpui/src/window_log.rs`): the resume is seen when the actor acknowledges it, a little after the new segment's epoch, so its first titles read slightly late.
 <!-- fork:end -->
 
 Cap is the open source alternative to Loom. It gives you fast screen recording, polished local editing, instant share links, comments, transcripts, analytics, team workspaces, custom domains, custom S3 storage, and full self-hosting when you need complete control.

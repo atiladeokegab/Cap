@@ -37,7 +37,7 @@ GRAPH = {"splines": "spline", "nodesep": "0.8", "ranksep": "1.1"}
 SHORTCUT = re.compile(r"//+[ \t]*shortcut:[ \t]*([^\n]*(?:\n[ \t]*//+(?![ \t]*shortcut:)[^\n]*)*)")
 SHORTCUT_DIRS = ("apps/desktop-gpui/src", "apps/desktop-gpui/gcs-mirror/src", "apps/cli/src", "crates/verify-stimulus/src")
 START, END = "<!-- fork:start (written by docs/architecture/c4.py) -->", "<!-- fork:end -->"
-BUCKET = "The takes bucket"
+BUCKET = "Object storage"
 
 # Level 4: the code the fork adds or changes, grouped by where it runs, as (path, what it does).
 APP, CRATE, CLI, CI, UPSTREAM = (
@@ -51,17 +51,18 @@ CODE = {
     APP: [
         ("apps/desktop-gpui/src/recording.rs", "Studio start: starts the mirror and the window log; finalize: mirror stop before the remux"),
         ("apps/desktop-gpui/src/session.rs", "Recording phases; shot_time(): take dir and (segment, ms) on the start-gate clock"),
-        ("apps/desktop-gpui/src/teleprompter_window.rs", "Shows the shot on screen; load_shot_list GETs it from the bucket; mark_shot"),
-        ("apps/desktop-gpui/src/shots.rs", "pick bucket or local list, parse (shotlist rules), ShotClock, mark -> shots.json"),
+        ("apps/desktop-gpui/src/teleprompter_window.rs", "Shows the shot on screen; load_shot_list GETs it from storage; mark_shot"),
+        ("apps/desktop-gpui/src/shots.rs", "pick the stored or local list, parse (shotlist rules), ShotClock, mark -> shots.json"),
         ("apps/desktop-gpui/src/hotkeys.rs", "Ctrl+Alt+N / Ctrl+Alt+R while a shot list shows -> Next shot / Retake"),
         ("apps/desktop-gpui/src/window_log.rs", "Windows: foreground window every 250 ms -> windows.jsonl, on change only"),
+        ("apps/desktop-gpui/src/window_log/change.rs", "What counts as a change; time_ms from the segment's start-gate epoch"),
         ("apps/desktop-gpui/src/gcs_mirror.rs", "Reads mirror.json from app data; start, stop, resume_pending"),
         ("apps/desktop-gpui/src/theme.rs", "Light palette and type tokens for the restyle"),
     ],
     CRATE: [
         ("apps/desktop-gpui/gcs-mirror/src/lib.rs", "Mirror: outbox hard links, scan, freeze -> stop.json, drain, manifest last"),
         ("apps/desktop-gpui/gcs-mirror/src/sigv4.rs", "SigV4 signing for the XML API with an HMAC key"),
-        ("apps/desktop-gpui/gcs-mirror/src/bin/cap-driver.rs", "Test adapter, JSON on stdin: sign, scan, stop, resume, shots"),
+        ("apps/desktop-gpui/gcs-mirror/src/bin/cap-driver.rs", "Test adapter, JSON on stdin: sign, scan, stop, resume, shots, windows"),
     ],
     CLI: [
         ("apps/cli/src/events.rs", "cap events <take> --json: cursor.json and keyboard.bin as one sorted list"),
@@ -80,6 +81,7 @@ CODE = {
 CALLS = [
     ("apps/desktop-gpui/src/recording.rs", "gcs_mirror::start", "apps/desktop-gpui/src/gcs_mirror.rs", "start; stop before remux"),
     ("apps/desktop-gpui/src/recording.rs", "window_log::start", "apps/desktop-gpui/src/window_log.rs", "start, stop"),
+    ("apps/desktop-gpui/src/window_log.rs", "mod change", "apps/desktop-gpui/src/window_log/change.rs", "detects changes, times lines"),
     ("apps/desktop-gpui/src/session.rs", "window_log::set_paused", "apps/desktop-gpui/src/window_log.rs", "set_paused"),
     ("apps/desktop-gpui/src/hotkeys.rs", "view.mark_shot", "apps/desktop-gpui/src/teleprompter_window.rs", "mark_shot"),
     ("apps/desktop-gpui/src/teleprompter_window.rs", "shot_time()", "apps/desktop-gpui/src/session.rs", "shot_time"),
@@ -91,6 +93,7 @@ CALLS = [
     ("apps/desktop-gpui/gcs-mirror/src/lib.rs", "sigv4::authorize", "apps/desktop-gpui/gcs-mirror/src/sigv4.rs", "authorize"),
     ("apps/desktop-gpui/gcs-mirror/src/bin/cap-driver.rs", "Mirror::new", "apps/desktop-gpui/gcs-mirror/src/lib.rs", "scan, stop, resume"),
     ("apps/desktop-gpui/gcs-mirror/src/bin/cap-driver.rs", "src/shots.rs", "apps/desktop-gpui/src/shots.rs", "includes by path"),
+    ("apps/desktop-gpui/gcs-mirror/src/bin/cap-driver.rs", "src/window_log/change.rs", "apps/desktop-gpui/src/window_log/change.rs", "includes by path"),
     ("crates/verify-stimulus/src/bin/window_log_probe.rs", "src/window_log.rs", "apps/desktop-gpui/src/window_log.rs", "includes by path"),
     (".github/workflows/verify-recording.yml", "cap-verify-stimulus", "crates/verify-stimulus/src/main.rs", "records the stimulus"),
     (".github/workflows/verify-recording.yml", "window-log-probe", "crates/verify-stimulus/src/bin/window_log_probe.rs", "runs"),
@@ -109,8 +112,8 @@ def context():
     with draw("context", "System Context"):
         lead = Person("Presenter", "Records a product demo on a Windows laptop")
         fork = System(SYSTEM, "Cap's desktop recorder plus a shot list, a window log, live upload and cap events")
-        store = System(BUCKET, "S3-compatible object storage, HMAC key from local config", external=True)
-        pipeline = System("Film pipeline", "On the hub VM: turns an uploaded take into an edited demo film", external=True)
+        store = System(BUCKET, "An S3-compatible bucket, HMAC key from local config", external=True)
+        pipeline = System("Film pipeline", "Turns an uploaded take into an edited demo film", external=True)
         ci = System("GitHub Actions", "Builds the unsigned Windows installer; records the Windows fixture take", external=True)
         lead >> Relationship("records; Next shot, Retake") >> fork
         fork >> Relationship("reads the shot list") >> store
@@ -128,7 +131,7 @@ def container():
         with SystemBoundary(SYSTEM):
             app = Container("Desktop app", "Rust, GPUI (apps/desktop-gpui)", "Studio recording, teleprompter shot list, window log, upload mirror")
             cli = Container("cap CLI", "Rust (apps/cli), same commit", "cap events <take> --json")
-            driver = Container("cap-driver", "Rust (gcs-mirror crate, test binary)", "The mirror and the shot logic, one JSON request per run")
+            driver = Container("cap-driver", "Rust (gcs-mirror crate, test binary)", "The mirror, shot and window-change logic, one JSON request per run")
             fixture = Container("Recording fixture", "GitHub Actions, windows-2022", "Studio take of the stimulus, SendInput clicks, artefact")
             release = Container("Release workflow", "GitHub Actions, windows-2022", "Unsigned installer, no updater artefacts")
             vendor = Database("contracts/vendor/0.1.0", "JSON Schema from the film repo", "shotlist, shots, windows, cap-events, manifest")
@@ -153,7 +156,7 @@ def component():
             gate = Component("Start gate", "crates/recording, reused", "The armed instant cursor.json, shots and windows count from")
             keys = Component("Shot hotkeys", "hotkeys.rs", "Ctrl+Alt+N, Ctrl+Alt+R while a shot list shows")
             tele = Component("Teleprompter", "teleprompter_window.rs", "Shows the shot on screen; Next shot, Retake")
-            shots = Component("Shots", "shots.rs", "Bucket list or local file; parse; marks -> shots.json")
+            shots = Component("Shots", "shots.rs", "Stored list or local file; parse; marks -> shots.json")
             win = Component("Window log", "window_log.rs", "Windows only: foreground title and process on change")
             wiring = Component("Mirror wiring", "gcs_mirror.rs", "mirror.json from app data; start, stop, resume_pending")
             mirror = Component("Mirror", "gcs-mirror crate: lib.rs, sigv4.rs", "outbox/ hard links, uploaded.jsonl, stop.json, manifest last")
@@ -177,7 +180,7 @@ def outline(path, text):
     """What a file defines: a workflow's step names, else its public functions."""
     if path.endswith(".yml"):
         return "steps: " + ", ".join(re.findall(r"^\s*- name:\s*(.+)$", text, re.M))
-    names = sorted(set(re.findall(r"pub(?:\([a-z]+\))?\s+fn\s+(\w+)", text)))
+    names = list(dict.fromkeys(re.findall(r"pub(?:\([a-z]+\))?\s+fn\s+(\w+)", text)))  # source order
     return "fns: " + ", ".join(names[:6]) + (", ..." if len(names) > 6 else "") if names else ""
 
 
@@ -218,20 +221,27 @@ def shortcuts():
 
 def readme():
     """Rewrite the fork section of README.md, placed below upstream's header on the first run."""
-    limits = "\n".join(f"- {text} (`{path}`" + (f", `{item}`)" if item else ")") for path, text, item in shortcuts())
+    limits = "\n".join(f"- `{item or Path(path).name}` (`{path}`): {text}" for path, text, item in shortcuts())
     images = "\n".join(f"![C4 {level}](docs/architecture/c4_{level}.png)" for level in LEVELS)
     section = f"""{START}
 ## This fork
 
 A fork of Cap for recording product demos that a film pipeline turns into edited films. The desktop
-app adds a shot list in the teleprompter, read from the bucket (or a local file), with Next shot and
-Retake on global hotkeys that write shot marks to the take's `shots.json`; a foreground-window log on
-Windows (`windows.jsonl`); an upload mirror that streams each studio take to S3-compatible storage
-while it records, with `take-manifest.json` last; and a light restyle. The CLI adds
-`cap events <take> --json`. Every time the fork writes is on the take's start-gate clock, the one
-`cursor.json` uses. GitHub Actions builds an unsigned Windows installer and records a real Windows
-fixture take. Upload settings live in a local `mirror.json` in the app data folder, never in this
-repo.
+app adds a shot list in the teleprompter, read from object storage (or a local file), with Next shot
+on Ctrl+Alt+N and Retake on Ctrl+Alt+R (Control+Option on macOS) writing shot marks to the take's
+`shots.json`. Those two global chords are registered only while the teleprompter shows a shot list,
+and a chord you have already bound to something else stays yours. It also adds a foreground-window
+log on Windows (`windows.jsonl`), an upload mirror that streams each studio take to S3-compatible
+storage while it records, with `take-manifest.json` last, and a light restyle. The CLI adds
+`cap events <take> --json`. GitHub Actions builds an unsigned Windows installer and records a real
+Windows fixture take. Upload settings live in a local `mirror.json` in the app data folder, never in
+this repo.
+
+Clocks: `shots.json` and `windows.jsonl` write `time_ms` from the segment's start-gate epoch (the
+gate's armed instant for segment 0, each resume for later segments), the clock `cursor.json` uses;
+`cap events` reports cursor and key events on that same clock. `stop.json` writes
+`stopped_at_unix_ms`, wall-clock Unix milliseconds (the gate's armed wall time plus the monotonic
+time since). `take-manifest.json` holds no times.
 
 {images}
 
