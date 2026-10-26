@@ -48,7 +48,6 @@ pub mod look {
     /// The spacing steps; everything is a multiple of 4.
     pub const SPACE_1: f32 = 4.;
     pub const SPACE_2: f32 = 8.;
-    pub const SPACE_4: f32 = 16.;
 
     /// Buttons and small controls.
     pub const RADIUS_CONTROL: f32 = 8.;

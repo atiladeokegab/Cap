@@ -5705,12 +5705,6 @@ impl MainWindow {
         (MAIN_WINDOW_WIDTH - 50.) / 2.
     }
 
-    /// One of the start screen's three card columns: the body's 13px gutters
-    /// and the two gaps out of the window width.
-    fn target_column_width() -> f32 {
-        (MAIN_WINDOW_WIDTH - 26. - 2. * look::SPACE_2) / 3.
-    }
-
     /// `TargetMenuGrid`: two columns of cards.
     ///
     /// Each card leads with a live 320x180 capture of the display or window
@@ -6469,7 +6463,7 @@ impl MainWindow {
     }
 
     /// The Canvid start screen: Display, Window and Area as three large cards,
-    /// then "Take a Screenshot" across two columns with Camera Only beside it.
+    /// then "Take a Screenshot" and Camera Only side by side underneath.
     fn render_targets(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -6577,22 +6571,19 @@ impl MainWindow {
     }
 
     /// Area is a plain card; Camera Only is the short card beside "Take a
-    /// Screenshot", one column wide.
+    /// Screenshot".
     fn render_target_tile(&self, target: TargetType, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let selected = self.target == Some(target);
 
         div()
             .flex()
-            .map(|this| {
-                if target == TargetType::CameraOnly {
-                    this.flex_none()
-                        .w(px(Self::target_column_width()))
-                        .h(px(look::SECONDARY_CARD_HEIGHT))
-                } else {
-                    this.flex_1().h(px(look::TARGET_CARD_HEIGHT))
-                }
-            })
+            .flex_1()
+            .h(px(if target == TargetType::CameraOnly {
+                look::SECONDARY_CARD_HEIGHT
+            } else {
+                look::TARGET_CARD_HEIGHT
+            }))
             .overflow_hidden()
             .rounded(px(look::RADIUS_CARD))
             .map(|this| glass_button(this, theme, selected))
@@ -6679,7 +6670,6 @@ impl MainWindow {
         let theme = self.theme;
         div()
             .flex()
-            // Two of the three columns above, plus the gap between them.
             .flex_1()
             .h(px(look::SECONDARY_CARD_HEIGHT))
             .overflow_hidden()
@@ -6908,7 +6898,7 @@ impl MainWindow {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(14.))
+                    .text_size(px(look::BODY_SIZE))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.gray_12)
                     .truncate()
