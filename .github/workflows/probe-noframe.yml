@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [blacksmith-6vcpu-macos-15, macos-15]
+        runner: [blacksmith-6vcpu-macos-15]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:

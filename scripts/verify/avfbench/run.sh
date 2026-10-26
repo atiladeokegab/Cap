@@ -16,12 +16,18 @@ cores=$(sysctl -n hw.ncpu)
 for res in 640x360 1920x1080 3024x1964; do
   "$work/avfread" "$work/clip-$res.mp4" "idle"
 done
-burn=()
-for _ in $(seq $((cores * 2))); do yes >/dev/null & burn+=($!); done
-sleep 1
-for res in 640x360 1920x1080 3024x1964; do
-  "$work/avfread" "$work/clip-$res.mp4" "cpu-burn"
-done
-kill "${burn[@]}" 2>/dev/null
-wait 2>/dev/null
+arm() { # <label> <count> <prefix...>
+  local label=$1 count=$2; shift 2
+  local burn=()
+  for _ in $(seq "$count"); do "$@" yes >/dev/null & burn+=($!); done
+  sleep 1
+  "$work/avfread" "$work/clip-1920x1080.mp4" "$label"
+  kill "${burn[@]}" 2>/dev/null
+  wait 2>/dev/null
+}
+arm "burn-1x-cores" "$cores" env
+arm "burn-2x-cores" $((cores * 2)) env
+arm "burn-2x-nice20" $((cores * 2)) nice -n 20
+arm "burn-2x-taskpolicy-b" $((cores * 2)) taskpolicy -b
+arm "burn-half-cores" $((cores / 2)) env
 echo "cores=$cores $(sysctl -n machdep.cpu.brand_string 2>/dev/null) $(sysctl -n hw.model 2>/dev/null)"
