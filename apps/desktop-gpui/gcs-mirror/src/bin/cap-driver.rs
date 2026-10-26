@@ -163,11 +163,19 @@ fn run(request: &Value) -> Result<Value, String> {
                     .ok_or("stopped_at_unix_ms")?,
                 millis(request, "drain_timeout_ms", 120_000),
             );
-            Ok(json!({ "enabled": true, "frozen": report.frozen, "drained": report.drained }))
+            Ok(json!({
+                "enabled": true,
+                "frozen": report.frozen,
+                "drained": report.drained,
+                "error": report.error,
+            }))
         }
         "resume" => {
             let deadline = Instant::now() + millis(request, "drain_timeout_ms", 15_000);
-            Ok(json!({ "enabled": true, "drained": mirror.drain(Some(deadline)) }))
+            Ok(match mirror.drain(Some(deadline)) {
+                Ok(drained) => json!({ "enabled": true, "drained": drained }),
+                Err(error) => json!({ "enabled": true, "drained": false, "error": error }),
+            })
         }
         op => Err(format!("unknown op {op:?}")),
     }
