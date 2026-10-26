@@ -77,20 +77,30 @@ jobs:
             [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint data, flags, time; public IntPtr extra; }
             [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public MOUSEINPUT mi; }
             [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] inputs, int size);
-            public static uint Click() {
-              // MOVE | ABSOLUTE to the centre (0..65535 space), then LEFTDOWN, LEFTUP
-              var flags = new uint[] { 0x8001, 0x0002, 0x0004 };
-              var inputs = new INPUT[3];
-              for (int i = 0; i < 3; i++) { inputs[i].type = 0; inputs[i].mi.dx = 32768; inputs[i].mi.dy = 32768; inputs[i].mi.flags = flags[i]; }
-              return SendInput(3, inputs, Marshal.SizeOf(typeof(INPUT)));
+            static uint Send(uint flags, int x, int y) {
+              var inputs = new INPUT[1];
+              inputs[0].type = 0; inputs[0].mi.dx = x; inputs[0].mi.dy = y; inputs[0].mi.flags = flags;
+              return SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
+            }
+            // Cap's cursor recorder polls every 16 ms: hold the button 60 ms so each press is seen, and
+            // step the position (0..65535 space, near the centre) so moves are recorded too.
+            public static uint Click(int step) {
+              int x = 32768 + (step % 5 - 2) * 1500, y = 32768;
+              uint sent = Send(0x8001, x, y);  // MOVE | ABSOLUTE
+              System.Threading.Thread.Sleep(30);
+              sent += Send(0x0002, x, y);      // LEFTDOWN
+              System.Threading.Thread.Sleep(60);
+              return sent + Send(0x0004, x, y); // LEFTUP
             }
           }
           "@
           $out = Join-Path $env:CLICKS_DIR 'clicks.jsonl'
           $stop = Join-Path $env:CLICKS_DIR 'stop'
           $deadline = (Get-Date).AddMinutes(30)
+          $step = 0
           while (-not (Test-Path $stop) -and (Get-Date) -lt $deadline) {
-            $sent = [Clicker]::Click()
+            $step++
+            $sent = [Clicker]::Click($step)
             $ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
             Add-Content $out ('{"unix_ms":' + $ms + ',"sent":' + $sent + '}')
             Start-Sleep -Milliseconds 500
