@@ -454,6 +454,8 @@ pub struct RecordingSession {
     countdown_remaining: Option<u32>,
     countdown_cue_abort: Option<futures_util::future::AbortHandle>,
     start_gate: Option<cap_recording::RecordingStartGate>,
+    /// The teleprompter's shot marks read this, never `elapsed()`.
+    shot_clock: crate::shots::ShotClock,
     start_cue: Option<crate::app_sounds::StartCue>,
     /// A capture pipeline that finished warming up while the countdown or the
     /// start cue was still running; activated the moment the cue ends.
@@ -508,6 +510,7 @@ impl RecordingSession {
             countdown_remaining: None,
             countdown_cue_abort: None,
             start_gate: None,
+            shot_clock: Default::default(),
             start_cue: None,
             primed: None,
             primed_ready: None,
@@ -557,6 +560,23 @@ impl RecordingSession {
                 .map(|since| since.elapsed())
                 .unwrap_or_default();
         started_at.elapsed().saturating_sub(paused)
+    }
+
+    /// Where a shot mark goes and when it lands: the take's dir and
+    /// `(segment, time_ms)` on the start-gate clock `cursor.json` uses. Studio
+    /// only -- an instant recording has no segments.
+    pub fn shot_time(&self) -> Option<(std::path::PathBuf, (u32, u64))> {
+        if self.mode() != Some(recording::RecordingMode::Studio) {
+            return None;
+        }
+        let active = self.active.as_ref()?;
+        let armed = self
+            .start_gate
+            .as_ref()
+            .and_then(cap_recording::RecordingStartGate::armed_at)
+            .map(|armed| armed.instant());
+        let at = self.shot_clock.read(armed, Instant::now())?;
+        Some((active.project_dir.clone(), at))
     }
 
     pub fn is_paused(&self) -> bool {
@@ -958,6 +978,7 @@ impl RecordingSession {
         self.started_at = Some(Instant::now());
         self.paused_accum = Duration::ZERO;
         self.paused_since = None;
+        self.shot_clock = Default::default();
         self.start_cue = None;
         if self.mode() == Some(recording::RecordingMode::Studio) {
             crate::app_windows::prewarm_shared_wgpu_device(cx);
@@ -1425,6 +1446,9 @@ impl RecordingSession {
             active.pause_handle()
         };
         let query_paused = active.is_paused_handle();
+        // The resumed segment's epoch is taken as the actor gets the message;
+        // the acknowledgement only comes once its pipeline is built.
+        let requested_at = Instant::now();
         cx.notify();
         let task = gpui_tokio::Tokio::spawn(
             cx,
@@ -1459,8 +1483,10 @@ impl RecordingSession {
                         if let Some(since) = this.paused_since.take() {
                             this.paused_accum += since.elapsed();
                         }
+                        this.shot_clock.resume(requested_at);
                     } else if !was_paused && paused {
                         this.paused_since = Some(Instant::now());
+                        this.shot_clock.pause();
                     }
                 }
                 if this.pause_control_error.is_some() && this.error == this.pause_control_error {
@@ -1635,8 +1661,13 @@ impl RecordingSession {
                         if let Some(since) = this.paused_since.take() {
                             this.paused_accum += since.elapsed();
                         }
+                        // shortcut: the acknowledgement lands after the new
+                        // segment's pipeline is built, so marks after a clean
+                        // capture resume read a little early; Linux only.
+                        this.shot_clock.resume(Instant::now());
                     } else if !was_paused && paused {
                         this.paused_since = Some(Instant::now());
+                        this.shot_clock.pause();
                     }
                 }
                 if let Some(error) = outcome.error {

@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[path = "window_log/change.rs"]
 mod change;
 
 use change::{ChangeDetector, Foreground, WindowLine};

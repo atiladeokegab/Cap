@@ -84,6 +84,7 @@ mod script_text;
 mod session;
 mod settings_pages;
 mod settings_window;
+mod shots;
 mod sign_in;
 mod single_instance;
 #[cfg(debug_assertions)]

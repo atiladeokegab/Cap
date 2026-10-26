@@ -33,6 +33,7 @@ use crate::theme::LocaleFont as _;
 use crate::{
     platform,
     session::{Phase, RecordingSession},
+    shots::{self, Shots},
     store::{self, TeleprompterState},
     theme::Theme,
     ui,
@@ -232,6 +233,11 @@ pub struct TeleprompterWindow {
     /// of keystrokes one write.
     save_task: Option<gpui::Task<()>>,
     playback: Option<gpui::Task<()>>,
+    /// A shot list, from the bucket or the app-data dir, turns the script
+    /// into the shot list; without one this is the stock teleprompter.
+    shots: Option<Shots>,
+    /// Why the shot list did not load, or the last `shots.json` write failed.
+    shots_error: Option<String>,
 }
 
 impl TeleprompterWindow {
@@ -248,7 +254,10 @@ impl TeleprompterWindow {
         let closing = save.clone();
         window.on_window_should_close(cx, move |_window, cx| {
             closing.borrow_mut().flush();
-            cx.defer(crate::app_windows::teleprompter_closed);
+            cx.defer(|cx| {
+                crate::app_windows::teleprompter_closed(cx);
+                crate::hotkeys::set_shot_keys(false, cx);
+            });
             true
         });
 
@@ -293,6 +302,37 @@ impl TeleprompterWindow {
             window.refresh();
         });
 
+        // The bucket GET blocks for up to its timeout: off the main thread,
+        // with the stock teleprompter until it lands.
+        cx.spawn_in(window, async move |this, cx| {
+            let (list, warning) = cx
+                .background_executor()
+                .spawn(async { load_shot_list() })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                if let Some(warning) = &warning {
+                    tracing::warn!(%warning, "shot list");
+                }
+                this.shots = list.map(Shots::new);
+                // Opened mid-take: show the shot the saved marks left on screen.
+                if let (Some(shots), Some((take, _))) = (
+                    this.shots.as_mut(),
+                    RecordingSession::global(cx).read(cx).shot_time(),
+                ) {
+                    shots.open(&take);
+                }
+                this.shots_error = warning;
+                if this.shots.is_some() {
+                    crate::hotkeys::set_shot_keys(true, cx);
+                    this.focus_root(window, cx);
+                }
+                cx.notify();
+                window.refresh();
+            })
+            .ok();
+        })
+        .detach();
+
         crate::theme::bind_window(window, cx);
         Self {
             theme: Theme::for_window(window, cx, true),
@@ -311,13 +351,35 @@ impl TeleprompterWindow {
             save,
             save_task: None,
             playback: None,
+            shots: None,
+            shots_error: None,
         }
     }
 
     pub fn focus_root(&self, window: &mut Window, cx: &mut Context<Self>) {
-        // `onMount` focuses the script editor itself, not the shell.
-        let focus = self.script_input.read(cx).focus_handle();
+        // `onMount` focuses the script editor itself, not the shell. The shot
+        // list has no editor, and the shell takes its hotkeys.
+        let focus = match self.shots {
+            Some(_) => self.focus.clone(),
+            None => self.script_input.read(cx).focus_handle(),
+        };
         window.focus(&focus, cx);
+    }
+
+    /// Next shot / Retake: a mark in the live take's `shots.json`. Nothing
+    /// while no studio recording is running or it is paused.
+    pub fn mark_shot(&mut self, action: shots::Action, cx: &mut Context<Self>) {
+        let Some(shots) = self.shots.as_mut() else {
+            return;
+        };
+        let Some((take, at)) = RecordingSession::global(cx).read(cx).shot_time() else {
+            return;
+        };
+        self.shots_error = shots.mark(action, &take, at).err().map(|error| {
+            tracing::error!(%error, "could not write shots.json");
+            format!("Could not write shots.json: {error}")
+        });
+        cx.notify();
     }
 
     /// `clamp(state().windowOpacityPercent, 45, 100) / 100`, for the initial
@@ -561,6 +623,45 @@ impl TeleprompterWindow {
     }
 }
 
+/// [`shots::BUCKET_KEY`] through the mirror's `mirror.json` and signer, else
+/// the app-data [`shots::LOCAL_FILE`]. Blocking.
+fn load_shot_list() -> (Option<shots::ShotList>, Option<String>) {
+    let bucket = cap_gcs_mirror::Config::load(&store::app_data_dir().join("mirror.json"))
+        .ok_or_else(|| "no mirror.json".to_string())
+        .and_then(|config| {
+            // `Mirror::new`'s default endpoint.
+            let endpoint = config
+                .endpoint
+                .as_deref()
+                .unwrap_or("https://storage.googleapis.com")
+                .trim_end_matches('/');
+            let url = reqwest::Url::parse(&format!(
+                "{endpoint}/{}/{}",
+                config.bucket,
+                shots::BUCKET_KEY
+            ))
+            .map_err(|error| error.to_string())?;
+            let signer = cap_gcs_mirror::sigv4::Key {
+                access_key: &config.access_key,
+                secret_key: &config.secret_key,
+                region: &config.region,
+                service: "s3",
+            };
+            cap_gcs_mirror::request(
+                &reqwest::blocking::Client::new(),
+                &signer,
+                "GET",
+                &url,
+                Vec::new(),
+                Duration::from_secs(10),
+            )
+        })
+        .inspect_err(|error| tracing::info!(%error, "no shot list from the bucket"));
+    shots::pick(bucket, || {
+        std::fs::read(store::app_data_dir().join(shots::LOCAL_FILE))
+    })
+}
+
 /// A range's value snapped to its step -- [`ui::snap_to_step`] over
 /// [`ui::value_from_fraction`], which reproduces this window's own formula
 /// exactly (`ui::slider::tests::slider_snapping_matches_the_formulas_it_replaced`).
@@ -599,7 +700,10 @@ impl Render for TeleprompterWindow {
             .font_weight(FontWeight::MEDIUM)
             .text_color(Hsla::from(theme.gray_12))
             .child(self.render_header(window))
-            .child(self.render_body(window, cx))
+            .map(|this| match &self.shots {
+                Some(shots) => this.child(self.render_shot(shots)),
+                None => this.child(self.render_body(window, cx)),
+            })
             .child(self.render_footer(cx))
             // `z-30` on the popover, over a footer that makes no stacking
             // context of its own -- so it paints last.
@@ -614,9 +718,14 @@ impl TeleprompterWindow {
     /// have focus, because Escape is bound as an action in the `TextInput` key
     /// context and a matched binding consumes the keystroke.
     fn on_key(&mut self, event: &gpui::KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if event.keystroke.key.as_str() == "escape" && self.settings_open {
-            self.settings_open = false;
-            cx.notify();
+        match event.keystroke.key.as_str() {
+            "escape" if self.settings_open => {
+                self.settings_open = false;
+                cx.notify();
+            }
+            "n" | "right" => self.mark_shot(shots::Action::Next, cx),
+            "r" => self.mark_shot(shots::Action::Retake, cx),
+            _ => {}
         }
     }
 
@@ -661,10 +770,12 @@ impl TeleprompterWindow {
                             .flex_shrink_0()
                             .text_color(Hsla::from(theme.gray_9)),
                     )
-                    .child(if self.playback_state.recording_paused {
-                        "Scrolling paused with recording"
+                    .child(if let Some(error) = &self.shots_error {
+                        error.clone()
+                    } else if self.playback_state.recording_paused {
+                        "Scrolling paused with recording".into()
                     } else {
-                        "This window is hidden from Cap recordings"
+                        "This window is hidden from Cap recordings".into()
                     }),
             );
 
@@ -795,6 +906,80 @@ impl TeleprompterWindow {
             })
     }
 
+    /// The shot on screen: its place in the list and title, what must be on
+    /// screen, then its lines at the script's size.
+    fn render_shot(&self, shots: &Shots) -> impl IntoElement {
+        let theme = self.theme;
+        let shot = shots.current();
+        div()
+            .id("shot")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .px(px(32.))
+            .py(px(8.))
+            .text_center()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(Hsla::from(theme.gray_9))
+                    .child(format!(
+                        "{}/{} \u{b7} {}",
+                        shots.index() + 1,
+                        shots.list.shots.len(),
+                        shot.title
+                    )),
+            )
+            .when_some(shot.on_screen.clone(), |this, on_screen| {
+                this.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(Hsla::from(theme.blue_10))
+                        .child(format!("On screen: {on_screen}")),
+                )
+            })
+            .children(shot.lines.iter().map(|line| {
+                div()
+                    .text_size(px(self.state.font_size))
+                    .line_height(px(self.state.font_size * self.state.line_height))
+                    .text_color(Hsla::from(theme.gray_12))
+                    .child(line.text.clone())
+            }))
+    }
+
+    /// A text pill for Next shot and Retake with its global chord, dimmed
+    /// while there is no live studio take to mark.
+    fn shot_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        action: shots::Action,
+        live: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        self.pill()
+            .id(id)
+            .text_size(px(11.))
+            .text_color(Hsla::from(theme.gray_12))
+            .child(label)
+            .child(
+                div()
+                    .text_color(Hsla::from(theme.gray_9))
+                    .child(crate::hotkeys::shot_key_label(action)),
+            )
+            .when(!live, |this| this.opacity(0.3))
+            .when(live, |this| {
+                this.hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.11)))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.mark_shot(action, cx);
+                    }))
+            })
+    }
+
     /// `flex h-11 shrink-0 items-center px-3 pb-2`.
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
@@ -809,68 +994,83 @@ impl TeleprompterWindow {
             .flex_shrink_0()
             .px(px(12.))
             .pb(px(8.))
-            .child(
-                // `flex size-8 items-center justify-center rounded-full border
-                //  border-gray-12/6 bg-gray-12/7 text-gray-12 shadow-sm
-                //  disabled:opacity-30`
-                div()
-                    .id("playback")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(32.))
-                    .flex_shrink_0()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(Theme::with_alpha(theme.gray_12, 0.06))
-                    .bg(Theme::with_alpha(theme.gray_12, 0.07))
-                    .when(!enabled, |this| this.opacity(0.3))
-                    .when(enabled, |this| {
-                        this.hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.11)))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_playback(window, cx);
-                            }))
-                    })
-                    .child(
-                        svg()
-                            .path(if playing {
-                                "icons/pause.svg"
-                            } else {
-                                "icons/play.svg"
-                            })
-                            .size(px(14.))
-                            .text_color(Hsla::from(theme.gray_12)),
-                    ),
-            )
-            .child(
-                // The scroll-speed pill: `ml-1.5 h-8 gap-1.5 rounded-full
-                //  border border-gray-12/6 bg-gray-12/5 px-2`.
-                self.pill()
-                    .ml(px(6.))
-                    .child(
-                        svg()
-                            .path("icons/gauge.svg")
-                            .size(px(14.))
-                            .flex_shrink_0()
-                            .text_color(Hsla::from(theme.gray_9)),
-                    )
-                    .child(self.render_range(
-                        "speed",
-                        Slider::Speed,
-                        (self.state.words_per_minute as f32 - WPM_MIN) / (WPM_MAX - WPM_MIN),
-                        Hsla::from(theme.blue_9),
+            .when(self.shots.is_some(), |this| {
+                // The shot list replaces the scroll controls: nothing scrolls.
+                let live = RecordingSession::global(cx).read(cx).shot_time().is_some();
+                this.gap(px(6.))
+                    .child(self.shot_button(
+                        "next-shot",
+                        "Next shot",
+                        shots::Action::Next,
+                        live,
                         cx,
                     ))
-                    .child(
-                        // `w-12 text-right text-[10px] tabular-nums text-gray-9`
-                        div()
-                            .w(px(48.))
-                            .text_right()
-                            .text_size(px(10.))
-                            .text_color(Hsla::from(theme.gray_9))
-                            .child(format!("{} wpm", self.state.words_per_minute)),
-                    ),
-            )
+                    .child(self.shot_button("retake", "Retake", shots::Action::Retake, live, cx))
+            })
+            .when(self.shots.is_none(), |this| {
+                this.child(
+                    // `flex size-8 items-center justify-center rounded-full border
+                    //  border-gray-12/6 bg-gray-12/7 text-gray-12 shadow-sm
+                    //  disabled:opacity-30`
+                    div()
+                        .id("playback")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(32.))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(Theme::with_alpha(theme.gray_12, 0.06))
+                        .bg(Theme::with_alpha(theme.gray_12, 0.07))
+                        .when(!enabled, |this| this.opacity(0.3))
+                        .when(enabled, |this| {
+                            this.hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.11)))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_playback(window, cx);
+                                }))
+                        })
+                        .child(
+                            svg()
+                                .path(if playing {
+                                    "icons/pause.svg"
+                                } else {
+                                    "icons/play.svg"
+                                })
+                                .size(px(14.))
+                                .text_color(Hsla::from(theme.gray_12)),
+                        ),
+                )
+                .child(
+                    // The scroll-speed pill: `ml-1.5 h-8 gap-1.5 rounded-full
+                    //  border border-gray-12/6 bg-gray-12/5 px-2`.
+                    self.pill()
+                        .ml(px(6.))
+                        .child(
+                            svg()
+                                .path("icons/gauge.svg")
+                                .size(px(14.))
+                                .flex_shrink_0()
+                                .text_color(Hsla::from(theme.gray_9)),
+                        )
+                        .child(self.render_range(
+                            "speed",
+                            Slider::Speed,
+                            (self.state.words_per_minute as f32 - WPM_MIN) / (WPM_MAX - WPM_MIN),
+                            Hsla::from(theme.blue_9),
+                            cx,
+                        ))
+                        .child(
+                            // `w-12 text-right text-[10px] tabular-nums text-gray-9`
+                            div()
+                                .w(px(48.))
+                                .text_right()
+                                .text_size(px(10.))
+                                .text_color(Hsla::from(theme.gray_9))
+                                .child(format!("{} wpm", self.state.words_per_minute)),
+                        ),
+                )
+            })
             .child(
                 // `ml-auto flex items-center gap-1.5`
                 div()
