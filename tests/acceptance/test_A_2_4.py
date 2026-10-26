@@ -1,6 +1,7 @@
 import json
 import time
 
+import pytest
 from conftest import digest, file_snapshot, finish_take
 
 
@@ -51,3 +52,40 @@ def test_bounded_stop_freezes_every_input_and_restart_needs_no_originals(mirror)
     assert mirror.server.puts() == first_puts, (
         "A new adapter process must resume without duplicate objects"
     )
+
+
+@pytest.mark.parametrize("defect", ["missing", "corrupted", "outside-outbox"])
+def test_resume_never_certifies_missing_corrupt_or_escaping_inventory(mirror, defect):
+    finish_take(mirror.take)
+    mirror.server.fail_puts = True
+    stopped = mirror("stop", stopped_at_unix_ms=1793016000000, drain_timeout_ms=100)
+    assert stopped["frozen"] and not stopped["drained"]
+    stop_path = mirror.outbox / "stop.json"
+    stop = json.loads(stop_path.read_text())
+    if defect == "missing":
+        (mirror.outbox / "project-config.json").unlink()
+    elif defect == "corrupted":
+        (mirror.outbox / "project-config.json").write_bytes(b"corrupted-after-freeze")
+    else:
+        marker = b"synthetic-outside-proof"
+        (mirror.outbox.parent / "outside-proof").write_bytes(marker)
+        stop["expected_files"].append(
+            {"path": "../outside-proof", "size": len(marker), "sha256": digest(marker)}
+        )
+        stop_path.write_text(json.dumps(stop))
+    mirror.server.fail_puts = False
+    try:
+        result = mirror("resume", drain_timeout_ms=100)
+    except AssertionError as error:
+        assert defect == "outside-outbox" and any(
+            word in str(error).lower() for word in ("path", "outbox", "parent")
+        ), str(error)
+    else:
+        assert not result["drained"], "Invalid inventory was reported complete"
+    assert not any(
+        path.endswith("/take-manifest.json") for path, _ in mirror.server.puts()
+    )
+    if defect == "outside-outbox":
+        assert not any(body == marker for _, body in mirror.server.puts()), (
+            "Resume read outside its outbox"
+        )
