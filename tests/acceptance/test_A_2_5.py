@@ -1,7 +1,7 @@
 import json
 import re
 
-from conftest import digest, file_snapshot, finish_take
+from conftest import digest, file_snapshot, finish_take, validate_contract
 
 
 def test_final_manifest_is_last_complete_hashed_and_versioned(mirror):
@@ -25,5 +25,6 @@ def test_final_manifest_is_last_complete_hashed_and_versioned(mirror):
     assert re.fullmatch(r"[a-f0-9]{40}", manifest["fork_commit"])
     assert re.fullmatch(r"\d+\.\d+\.\d+", manifest["contracts_version"])
     assert manifest["project_format_version"] is not None
+    validate_contract("take-manifest", manifest, manifest["contracts_version"])
     for relative, body in expected.items():
         assert (mirror.take / relative).read_bytes() == body

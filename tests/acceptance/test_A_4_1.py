@@ -5,6 +5,9 @@ from conftest import source
 
 def test_windows_dispatch_fixture_uses_real_clicks_and_keeps_take():
     workflow = source(".github/workflows/verify-recording.yml")
+    # Strip YAML/shell line comments and PowerShell block comments, so a comment cannot satisfy a check.
+    workflow = re.sub(r"(?s)<#.*?#>", "", workflow)
+    workflow = re.sub(r"(?m)(?:^|\s)#.*$", "", workflow)
     assert "workflow_dispatch:" in workflow
     windows = re.search(
         r"(?ms)^  [\w-]+:\s*\n(?:(?!^  [\w-]+:).)*?runs-on:\s*['\"]?windows-2022.*?(?=^  [\w-]+:|\Z)",

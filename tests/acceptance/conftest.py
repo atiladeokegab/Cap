@@ -71,7 +71,7 @@ def workflow_text():
             if not line.lstrip().startswith("#")
         )
         if (
-            re.search(r"['\"]v\*['\"]", text)
+            re.search(r"\bv\*", text)
             and "workflow_dispatch" in text
             and "windows-2022" in text
         ):
@@ -80,6 +80,26 @@ def workflow_text():
         f"Expected one fork release workflow, found {[str(p) for p, _ in candidates]}"
     )
     return candidates[0][1]
+
+
+def validate_contract(name, value, version=None):
+    """Validate value against contracts/vendor/<version>/<name>.schema.json (D23)."""
+    import jsonschema
+
+    vendor = ROOT / "contracts/vendor"
+    if version is None:
+        versions = (
+            [p.name for p in vendor.iterdir() if p.is_dir()] if vendor.is_dir() else []
+        )
+        assert len(versions) == 1, (
+            "Vendor exactly one film contracts version in contracts/vendor/<version>/"
+        )
+        version = versions[0]
+    schema = vendor / version / f"{name}.schema.json"
+    assert schema.is_file(), (
+        f"Required implementation missing: contracts/vendor/{version}/{name}.schema.json"
+    )
+    jsonschema.validate(value, json.loads(schema.read_text()))
 
 
 def digest(data):

@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from conftest import shotlist
+from conftest import shotlist, validate_contract
 
 
 @pytest.mark.parametrize("delta", [125.0, 900.25, 12345.5])
@@ -19,3 +19,4 @@ def test_next_shot_uses_start_gate_clock_not_ui_elapsed(driver, tmp_path, delta)
     assert mark["shot_id"] == "intro" and mark["segment"] == 0
     assert abs(mark["time_ms"] - delta) <= 5
     assert json.loads((tmp_path / "shots.json").read_text()) == result["marks"]
+    validate_contract("shots", result["marks"])

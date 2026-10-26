@@ -1,4 +1,5 @@
 import os
+import re
 
 from conftest import run, source
 
@@ -20,6 +21,7 @@ def test_make_check_runs_the_offline_spine_without_recursion():
             "GIT_TERMINAL_PROMPT": "0",
         },
     )
-    assert "passed" in output, (
+    # cargo prints "N passed; 0 failed", so match pytest's summary of the selection
+    assert re.search(r"\b2 passed, \d+ deselected\b", output), (
         "make check must execute acceptance tests, not just echo a recipe"
     )
