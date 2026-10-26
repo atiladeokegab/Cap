@@ -9,53 +9,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+mod change;
+
+use change::{ChangeDetector, Foreground, WindowLine};
 
 pub const WINDOWS_LOG_FILE_NAME: &str = "windows.jsonl";
 const POLL: Duration = Duration::from_millis(250);
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct Foreground {
-    pub title: String,
-    pub process: String,
-    /// x, y, width, height in screen pixels
-    pub bounds: [i32; 4],
-}
-
-#[derive(Debug, PartialEq, Serialize)]
-pub struct WindowLine {
-    pub segment: u32,
-    pub time_ms: u64,
-    #[serde(flatten)]
-    pub window: Foreground,
-}
-
-/// Emits a line only when the window's title or process changes; a move or resize alone is not a change.
-#[derive(Default)]
-pub struct ChangeDetector {
-    last: Option<(String, String)>,
-}
-
-impl ChangeDetector {
-    pub fn observe(
-        &mut self,
-        segment: u32,
-        time_ms: u64,
-        window: Option<Foreground>,
-    ) -> Option<WindowLine> {
-        let window = window?;
-        let key = (window.title.clone(), window.process.clone());
-        if self.last.as_ref() == Some(&key) {
-            return None;
-        }
-        self.last = Some(key);
-        Some(WindowLine {
-            segment,
-            time_ms,
-            window,
-        })
-    }
-}
 
 /// Stops the poller when dropped.
 pub struct WindowLog {
@@ -124,9 +83,13 @@ pub fn set_paused(paused: bool) {
     }
 }
 
-/// Stop or cancel: no more lines for this take.
-pub fn stop() {
-    *lock() = None;
+/// Stop, cancel or delete of `take`: no more lines for it. A take started since (a restart, or a
+/// stale start discarded late) keeps its log.
+pub fn stop(take: &Path) {
+    let mut current = lock();
+    if current.as_ref().is_some_and(|current| current.take == take) {
+        *current = None;
+    }
 }
 
 fn lock() -> std::sync::MutexGuard<'static, Option<Current>> {
@@ -139,7 +102,7 @@ fn poll(path: PathBuf, segment: u32, epoch: impl Fn() -> Option<Instant>, stop: 
     let mut detector = ChangeDetector::default();
     while !stop.load(Ordering::Relaxed) {
         if let Some(epoch) = epoch() {
-            let time_ms = Instant::now().saturating_duration_since(epoch).as_millis() as u64;
+            let time_ms = change::time_ms(epoch, Instant::now());
             let line = detector.observe(segment, time_ms, foreground());
             // A segment that ended mid-poll writes nothing more, so segments never interleave.
             if let Some(line) = line.filter(|_| !stop.load(Ordering::Relaxed))
@@ -230,31 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn writes_a_line_only_when_the_foreground_window_changes() {
-        let mut detector = ChangeDetector::default();
-        let seen: Vec<_> = [
-            (0, window("Demo", "demo.exe", 0)),
-            (250, window("Demo", "demo.exe", 40)),
-            (500, None),
-            (750, window("Result", "demo.exe", 0)),
-            (1000, window("Result", "other.exe", 0)),
-            (1250, window("Result", "other.exe", 0)),
-        ]
-        .into_iter()
-        .filter_map(|(t, w)| detector.observe(0, t, w))
-        .map(|line| (line.time_ms, line.window.title, line.window.process))
-        .collect();
-        assert_eq!(
-            seen,
-            [
-                (0, "Demo".to_string(), "demo.exe".to_string()),
-                (750, "Result".into(), "demo.exe".into()),
-                (1000, "Result".into(), "other.exe".into())
-            ]
-        );
-    }
-
-    #[test]
     fn a_line_matches_the_windows_contract() {
         let line = ChangeDetector::default()
             .observe(1, 1500, window("Démo", "demo.exe", 0))
@@ -279,6 +217,64 @@ mod tests {
         assert!(cfg!(windows) || !tmp.path().join(WINDOWS_LOG_FILE_NAME).exists());
     }
 
+    /// Every way a take ends (stop, failed stop, cancel, delete, restart's discard; studio and
+    /// instant; each platform's cfg arm) ends its log, or the poller keeps appending to
+    /// windows.jsonl after the mirror froze the take. A source scan, because the Windows and macOS
+    /// arms do not compile on the Linux test host.
+    #[test]
+    fn every_stop_and_discard_path_stops_the_log() {
+        let source = include_str!("recording.rs");
+        let block = &source[source.find("\nimpl ActiveRecording {").unwrap()..];
+        let block = &block[..block.find("\n}\n").unwrap()];
+        let mut checked = Vec::new();
+        let mut lines = block.lines();
+        while let Some(line) = lines.next() {
+            let Some(name) = line
+                .strip_prefix("    ")
+                .filter(|l| ["pub", "async", "fn "].iter().any(|p| l.starts_with(p)))
+                .and_then(|l| l.split("fn ").nth(1))
+                .map(|rest| rest.split(['(', '<']).next().unwrap_or_default())
+            else {
+                continue;
+            };
+            let ends_a_take = name == "stop"
+                || name.starts_with("cancel_")
+                || name.starts_with("discard_")
+                || name.ends_with("_stop_handle")
+                || name.ends_with("_delete_handle");
+            if !ends_a_take {
+                continue;
+            }
+            let body: Vec<_> = lines.by_ref().take_while(|l| *l != "    }").collect();
+            assert!(
+                body.iter()
+                    .any(|l| l.trim() == "crate::window_log::stop(&self.project_dir);"),
+                "ActiveRecording::{name} ends a take without crate::window_log::stop"
+            );
+            checked.push(name);
+        }
+        for name in [
+            "clean_studio_stop_handle",
+            "studio_delete_handle",
+            "failed_stop_handle",
+            "instant_stop_handle",
+            "instant_delete_handle",
+            "cancel_preserving",
+            "cancel_and_delete",
+            "discard_cancelled_start",
+            "cancel_and_delete_with_query",
+            "stop",
+        ] {
+            assert!(
+                checked.contains(&name),
+                "scan missed ActiveRecording::{name}"
+            );
+        }
+        // Linux and macOS/Windows each have their own clean_studio_stop_handle.
+        let clean = checked.iter().filter(|n| **n == "clean_studio_stop_handle");
+        assert_eq!(clean.count(), 2);
+    }
+
     #[test]
     fn pause_ends_the_segment_and_resume_starts_the_next() {
         let tmp = tempfile::tempdir().unwrap();
@@ -294,7 +290,9 @@ mod tests {
         set_paused(false);
         set_paused(false);
         assert_eq!(state(), Some((1, true)));
-        stop();
+        stop(&tmp.path().join("an older take"));
+        assert_eq!(state(), Some((1, true)));
+        stop(tmp.path());
         assert_eq!(state(), None);
         set_paused(false);
         assert_eq!(state(), None);
