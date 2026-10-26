@@ -74,9 +74,18 @@ jobs:
             cargo build --locked --profile ci-verify -p cap-verify-stimulus --features window-log --bin window-log-probe
             echo "FORK_WINDOW_LOG=1" >> "$GITHUB_ENV"
           fi
+          # cap-driver needs no gpui, but inside apps/desktop-gpui cargo loads that
+          # workspace's patch to a local zed-cap checkout CI does not have. Build a
+          # copy as its own workspace, shots.rs where its #[path] expects it.
           if [ -f apps/desktop-gpui/gcs-mirror/src/bin/cap-driver.rs ]; then
-            cargo build --locked --release --manifest-path apps/desktop-gpui/Cargo.toml -p cap-gcs-mirror --bin cap-driver
-            echo "FORK_DRIVER=$(cd apps/desktop-gpui/target/release && pwd)/cap-driver.exe" >> "$GITHUB_ENV"
+            driver="$RUNNER_TEMP/driver"
+            mkdir -p "$driver/src"
+            cp -r apps/desktop-gpui/gcs-mirror "$driver/"
+            cp apps/desktop-gpui/src/shots.rs "$driver/src/"
+            cp apps/desktop-gpui/Cargo.lock "$driver/gcs-mirror/"
+            printf '\n[workspace]\n' >> "$driver/gcs-mirror/Cargo.toml"
+            cargo build --release --manifest-path "$driver/gcs-mirror/Cargo.toml" --bin cap-driver
+            echo "FORK_DRIVER=$(cd "$driver/gcs-mirror/target/release" && pwd)/cap-driver.exe" >> "$GITHUB_ENV"
           fi
           if [ -f apps/cli/src/events.rs ]; then
             cargo build --locked --profile ci-verify -p cap
