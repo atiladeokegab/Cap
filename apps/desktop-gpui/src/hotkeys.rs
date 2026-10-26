@@ -49,6 +49,27 @@ pub enum HotkeyAction {
     ScreenshotDisplay,
     ScreenshotWindow,
     ScreenshotArea,
+    /// Fork: the teleprompter's shot list. Not in the store: [`SHOT_KEYS`].
+    NextShot,
+    RetakeShot,
+}
+
+/// Fork: fixed chords, registered only while a teleprompter shows a shot
+/// list -- focus is on the demo app while recording, and Ctrl+Alt keeps clear
+/// of its shortcuts.
+const SHOT_KEYS: [(Code, HotkeyAction); 2] = [
+    (Code::KeyN, HotkeyAction::NextShot),
+    (Code::KeyR, HotkeyAction::RetakeShot),
+];
+
+/// [`SHOT_KEYS`] as the teleprompter shows them.
+pub fn shot_key_label(action: crate::shots::Action) -> &'static str {
+    match action {
+        crate::shots::Action::Next if cfg!(target_os = "macos") => "\u{2303}\u{2325}N",
+        crate::shots::Action::Retake if cfg!(target_os = "macos") => "\u{2303}\u{2325}R",
+        crate::shots::Action::Next => "Ctrl+Alt+N",
+        crate::shots::Action::Retake => "Ctrl+Alt+R",
+    }
 }
 
 const ACTION_KEYS: [(&str, HotkeyAction); 13] = [
@@ -107,6 +128,8 @@ struct Hotkeys {
     /// Set while the Shortcuts page records a new combo: a registered combo
     /// would otherwise fire its action instead of reaching the page.
     paused: bool,
+    /// Register [`SHOT_KEYS`] too: a teleprompter has a shot list loaded.
+    shot_keys: bool,
     #[cfg(target_os = "linux")]
     capture_stop: Option<HotKey>,
 }
@@ -119,6 +142,35 @@ impl Hotkeys {
             Some(manager) => Ok(manager),
             slot @ None => {
                 Ok(slot.insert(GlobalHotKeyManager::new().map_err(|error| error.to_string())?))
+            }
+        }
+    }
+
+    fn bind(&mut self, hotkey: HotKey, action: HotkeyAction) {
+        // The same combo bound to a second action keeps the one OS
+        // registration; the dispatch fires every action on it, the way the
+        // Tauri handler loops the whole map per press (`hotkeys.rs:201-205`
+        // over there).
+        if self
+            .bindings
+            .iter()
+            .any(|(existing, _)| existing.id() == hotkey.id())
+        {
+            self.bindings.push((hotkey, action));
+            return;
+        }
+        let registered = self
+            .manager()
+            .and_then(|manager| manager.register(hotkey).map_err(|error| error.to_string()));
+        match registered {
+            Ok(()) => self.bindings.push((hotkey, action)),
+            Err(error) => {
+                tracing::warn!(
+                    ?action,
+                    ?hotkey,
+                    "registering global hotkey failed: {error}"
+                );
+                self.unavailable.push(action);
             }
         }
     }
@@ -148,6 +200,7 @@ pub fn init(cx: &mut App) {
         bindings: Vec::new(),
         unavailable: Vec::new(),
         paused: false,
+        shot_keys: false,
         #[cfg(target_os = "linux")]
         capture_stop: None,
     });
@@ -243,6 +296,17 @@ pub fn resume(cx: &mut App) -> bool {
     cx.global_mut::<Hotkeys>().paused = false;
     reload(cx);
     true
+}
+
+/// The teleprompter loaded (or closed) a shot list: add or drop
+/// [`SHOT_KEYS`]. A pause or a reserved clean-capture stop defers it to their
+/// own reload.
+pub fn set_shot_keys(on: bool, cx: &mut App) {
+    if !cx.has_global::<Hotkeys>() || cx.global::<Hotkeys>().shot_keys == on {
+        return;
+    }
+    cx.global_mut::<Hotkeys>().shot_keys = on;
+    reload(cx);
 }
 
 pub fn unavailable_actions(cx: &App) -> Vec<&'static str> {
@@ -775,28 +839,14 @@ fn register_from_store(cx: &mut App) {
         if binding.shift {
             mods |= Modifiers::SHIFT;
         }
-        let hotkey = HotKey::new(Some(mods), code);
-        // The same combo bound to a second action keeps the one OS
-        // registration; the dispatch fires every action on it, the way the
-        // Tauri handler loops the whole map per press (`hotkeys.rs:201-205`
-        // over there).
-        if hotkeys
-            .bindings
-            .iter()
-            .any(|(existing, _)| existing.id() == hotkey.id())
-        {
-            hotkeys.bindings.push((hotkey, action));
-            continue;
-        }
-        let registered = hotkeys
-            .manager()
-            .and_then(|manager| manager.register(hotkey).map_err(|error| error.to_string()));
-        match registered {
-            Ok(()) => hotkeys.bindings.push((hotkey, action)),
-            Err(error) => {
-                tracing::warn!(?action, code = %binding.code, "registering global hotkey failed: {error}");
-                hotkeys.unavailable.push(action);
-            }
+        hotkeys.bind(HotKey::new(Some(mods), code), action);
+    }
+    if hotkeys.shot_keys {
+        for (code, action) in SHOT_KEYS {
+            hotkeys.bind(
+                HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), code),
+                action,
+            );
         }
     }
     hotkeys.release_idle_manager();
@@ -875,6 +925,8 @@ fn dispatch(action: HotkeyAction, cx: &mut App) {
             app_windows::arm_target_mode(TargetType::Window, cx)
         }
         HotkeyAction::OpenRecordingPickerArea => app_windows::arm_target_mode(TargetType::Area, cx),
+        HotkeyAction::NextShot => mark_shot(crate::shots::Action::Next, cx),
+        HotkeyAction::RetakeShot => mark_shot(crate::shots::Action::Retake, cx),
         HotkeyAction::ScreenshotDisplay => {
             let display = scap_targets::Display::get_containing_cursor()
                 .unwrap_or_else(scap_targets::Display::primary);
@@ -901,6 +953,18 @@ fn dispatch(action: HotkeyAction, cx: &mut App) {
             app_windows::arm_target_mode(TargetType::Area, cx);
         }
     }
+}
+
+fn mark_shot(action: crate::shots::Action, cx: &mut App) {
+    let Some(handle) = cx.global::<app_windows::AppWindows>().teleprompter else {
+        return;
+    };
+    handle
+        .update(cx, |view, window, cx| {
+            view.mark_shot(action, cx);
+            window.refresh();
+        })
+        .ok();
 }
 
 fn microphone_available(name: &str) -> bool {
@@ -1082,6 +1146,7 @@ mod tests {
             bindings: Vec::new(),
             unavailable: Vec::new(),
             paused: false,
+            shot_keys: false,
             #[cfg(target_os = "linux")]
             capture_stop: None,
         };

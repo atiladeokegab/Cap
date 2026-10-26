@@ -17,6 +17,37 @@ use serde::{Deserialize, Serialize};
 
 /// Beside Cap's files in the take; Cap writes nothing by this name.
 pub const SHOTS_FILE: &str = "shots.json";
+/// Where the film's story step publishes the list, at the takes bucket's root.
+pub const BUCKET_KEY: &str = "shotlist/current.json";
+/// The offline fallback, in the app-data dir.
+pub const LOCAL_FILE: &str = "shotlist.json";
+
+/// The bucket's list wins; offline, missing or malformed there, the local
+/// file. Returns the list, if any (none is the stock teleprompter), and a
+/// warning line for the teleprompter.
+pub fn pick(
+    bucket: Result<Vec<u8>, String>,
+    local: impl FnOnce() -> std::io::Result<Vec<u8>>,
+) -> (Option<ShotList>, Option<String>) {
+    let mut warnings = Vec::new();
+    if let Ok(bytes) = bucket {
+        match parse(&bytes) {
+            Ok(list) => return (Some(list), None),
+            Err(error) => warnings.push(format!("bucket {error}")),
+        }
+    }
+    let list = match local() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            warnings.push(format!("{LOCAL_FILE}: {error}"));
+            None
+        }
+        Ok(bytes) => parse(&bytes)
+            .inspect_err(|error| warnings.push(error.clone()))
+            .ok(),
+    };
+    (list, (!warnings.is_empty()).then(|| warnings.join("; ")))
+}
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Line {
@@ -216,6 +247,32 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{}", String::from_utf8_lossy(bad));
         }
+    }
+
+    #[test]
+    fn the_bucket_list_wins_and_the_local_file_is_the_fallback() {
+        let one = |id: &str| {
+            format!(r#"{{"shots": [{{"shot_id": "{id}", "title": "T", "lines": []}}]}}"#)
+                .into_bytes()
+        };
+        let first = |(list, warning): (Option<ShotList>, Option<String>)| {
+            (list.map(|list| list.shots[0].shot_id.clone()), warning)
+        };
+        let missing = || Err(std::io::ErrorKind::NotFound.into());
+        assert_eq!(
+            first(pick(Ok(one("bucket")), || Ok(one("local")))),
+            (Some("bucket".into()), None)
+        );
+        assert_eq!(
+            first(pick(Err("404".into()), || Ok(one("local")))),
+            (Some("local".into()), None)
+        );
+        assert_eq!(first(pick(Err("offline".into()), missing)), (None, None));
+        // Malformed in the bucket: the local file, and say so.
+        let (list, warning) = first(pick(Ok(b"{}".to_vec()), || Ok(one("local"))));
+        assert_eq!(list.as_deref(), Some("local"));
+        assert!(warning.unwrap().starts_with("bucket shotlist.json"));
+        assert!(pick(Ok(b"{}".to_vec()), missing).1.is_some());
     }
 
     #[test]
