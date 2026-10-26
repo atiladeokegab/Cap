@@ -207,17 +207,24 @@ jobs:
             exit 0
           fi
           config="$RUNNER_TEMP/mirror.json"
-          printf '%s' "$CAP_MIRROR_CONFIG" \
-            | jq --arg p "ci/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" '.prefix = $p' > "$config"
+          trap 'rm -f "$config"' EXIT
+          prefix="ci/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf '%s' "$CAP_MIRROR_CONFIG" | jq --arg p "$prefix" '.prefix = $p' > "$config"
+          # Driver errors carry the bucket path and endpoint; Actions masks only the whole secret.
+          for value in "$(jq -r '.bucket // empty' "$config")" "$(jq -r '.endpoint // empty' "$config" | sed -E 's#^[a-z]+://##; s#[/:].*##')"; do
+            [ -n "$value" ] && echo "::add-mask::$value"
+          done
           take=$(find "$CAP_VERIFY_SCRATCH" -type d -name recording.cap | head -1)
           outbox="$RUNNER_TEMP/outbox"
           jq -n --arg c "$config" --arg t "$take" --arg o "$outbox" '{op: "scan", config: $c, take: $t, outbox: $o}' \
             | "$FORK_DRIVER"
           jq -n --arg c "$config" --arg t "$take" --arg o "$outbox" --argjson now "$(date +%s%3N)" \
             '{op: "stop", config: $c, take: $t, outbox: $o, stopped_at_unix_ms: $now, drain_timeout_ms: 120000}' \
-            | "$FORK_DRIVER" | tee "$FORK_DIR/mirror-result.json"
-          echo "uploaded under ci/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/"
-          rm -f "$config"
+            | "$FORK_DRIVER" > "$RUNNER_TEMP/mirror-result.json"
+          jq . "$RUNNER_TEMP/mirror-result.json"
+          # The mirror's ledger lists each accepted PUT in order: keys only, never the bucket.
+          jq -r --arg p "$prefix" '"PUT \($p)/\(.key) \(.size)"' "$outbox/uploaded.jsonl"
+          jq -e '.drained == true' "$RUNNER_TEMP/mirror-result.json" > /dev/null
 
       - name: Upload take
         if: always()
