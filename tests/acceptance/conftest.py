@@ -8,6 +8,7 @@ import shutil
 import struct
 import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, unquote, urlsplit
@@ -246,6 +247,215 @@ def file_snapshot(root):
         for p in root.rglob("*")
         if p.is_file()
     }
+
+
+def listed(*ids):
+    """A shotlist.json holding these shots, each two lines long."""
+    return {
+        "shots": [
+            {
+                "shot_id": sid,
+                "title": sid.title(),
+                "lines": [
+                    {"sentence_id": f"{sid}-{n}", "text": f"{sid.title()} line {n}."}
+                    for n in (1, 2)
+                ],
+            }
+            for sid in ids
+        ]
+    }
+
+
+class Held:
+    """A published version whose GET is answered only once a later GET of the
+    key has arrived: an old, slow read the teleprompter must not wait on."""
+
+    def __init__(self, value):
+        self.value = value
+
+
+def republished(store, *versions):
+    """The film's shotlist/current.json, republished between reads: each GET
+    gets the next version (a JSON value, raw bytes, None for a 404, or Held),
+    the last one again once they run out. Returns the reads made (`stalled`
+    lists held reads no later read overtook) and the driver fields that point
+    the teleprompter at the key."""
+    key = "/acceptance-fixture/shotlist/current.json"
+
+    def encoded(v):
+        if isinstance(v, Held):
+            return Held(encoded(v.value))
+        return v if v is None or isinstance(v, bytes) else json.dumps(v).encode()
+
+    pending = [encoded(v) for v in versions]
+
+    class Reads(list):
+        pass
+
+    reads, arrived, answer = Reads(), threading.Condition(), threading.local()
+    reads.stalled = []
+
+    class Objects(dict):
+        def __contains__(self, path):
+            if path != key:
+                return super().__contains__(path)
+            with arrived:
+                version = pending.pop(0) if len(pending) > 1 else pending[0]
+                reads.append(version)
+                number = len(reads)
+                arrived.notify_all()
+            if isinstance(version, Held):
+                with arrived:
+                    if not arrived.wait_for(lambda: len(reads) > number, timeout=5):
+                        reads.stalled.append(number)
+                time.sleep(0.3)  # the later read is answered first
+                version = version.value
+            answer.body = version
+            return version is not None
+
+        def __getitem__(self, path):
+            return answer.body if path == key else super().__getitem__(path)
+
+    store.objects = Objects(store.objects)
+    return reads, {
+        "shotlist": None,
+        "shotlist_url": store.endpoint + key,
+        "access_key": "acceptance-access",
+        "secret_key": "acceptance-only-secret",
+    }
+
+
+def one_line_warning(result):
+    warning = result.get("warning")
+    assert isinstance(warning, str) and warning.strip(), "Expected a warning line"
+    assert "\n" not in warning.strip(), f"Warning is more than one line: {warning!r}"
+
+
+@pytest.fixture
+def xdisplay():
+    """A fresh Xvfb display at 1920x1080 for the cap CLI to record."""
+    if not shutil.which("Xvfb"):
+        pytest.skip("Headless recording needs Xvfb (slow)")
+    read, write = os.pipe()
+    server = subprocess.Popen(
+        [
+            "Xvfb",
+            "-displayfd",
+            str(write),
+            "-screen",
+            "0",
+            "1920x1080x24",
+            "-nolisten",
+            "tcp",
+            "-noreset",
+        ],
+        pass_fds=[write],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    os.close(write)
+    with os.fdopen(read) as announced:
+        number = announced.readline().strip()
+    try:
+        assert number, "Xvfb did not start"
+        yield ":" + number
+    finally:
+        server.terminate()
+        server.wait(timeout=10)
+
+
+def release_cli():
+    cli = ROOT / os.environ.get("CAP_RELEASE_CLI", "target/release/cap")
+    assert cli.is_file(), (
+        "Build the release cap CLI (cargo build --release -p cap) or set CAP_RELEASE_CLI to it"
+    )
+    return cli
+
+
+def record_screen(display, take, seconds, during=None):
+    """`cap record start --detach`, then `cap record stop`, on `display`, with no
+    LD_LIBRARY_PATH. `during(clock)` runs while recording. Returns monotonic
+    times: start_called, started, stop_called, stopped."""
+    env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
+    env["DISPLAY"] = display
+
+    def cli(*args):
+        result = subprocess.run(
+            [str(release_cli()), *args],
+            cwd=take.parent,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result.stdout
+
+    screens = json.loads(cli("record", "screens", "--json"))
+    full_hd = [
+        s["id"]
+        for s in screens
+        if s["physicalSize"] == {"width": 1920.0, "height": 1080.0}
+    ]
+    assert full_hd, f"No 1920x1080 screen in {screens}"
+    clock = {"start_called": time.monotonic()}
+    cli("record", "start", "--screen", str(full_hd[0]), "--detach", "--path", str(take))
+    clock["started"] = time.monotonic()
+    stopped = False
+    try:
+        if during:
+            during(clock)
+        time.sleep(max(0.0, clock["started"] + seconds - time.monotonic()))
+        clock["stop_called"] = time.monotonic()
+        cli("record", "stop", "--path", str(take))
+        stopped = True
+        clock["stopped"] = time.monotonic()
+    finally:
+        if not stopped:
+            subprocess.run(
+                [str(release_cli()), "record", "stop", "--path", str(take)],
+                env=env,
+                capture_output=True,
+                timeout=90,
+                check=False,
+            )
+    return clock
+
+
+def media_seconds(path):
+    output = run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ]
+    )
+    return float(output.strip())
+
+
+def display_seconds(take, scratch):
+    """The display track's length. A fragmented track (a folder) is joined,
+    init then fragments in manifest order, into `scratch`, never the take."""
+    meta = json.loads((take / "recording-meta.json").read_text())
+    (segment,) = meta["segments"]
+    track = take / segment["display"]["path"]
+    if track.is_dir():
+        manifest = json.loads((track / "manifest.json").read_text())
+        # Cap's v5 m4s manifest lists "segments"; older ones list "fragments".
+        entries = manifest.get("segments", manifest.get("fragments"))
+        joined = scratch / "display-joined.mp4"
+        parts = [manifest.get("init_segment", "init.mp4")] + [
+            f["path"] for f in sorted(entries, key=lambda f: f["index"])
+        ]
+        joined.write_bytes(b"".join((track / part).read_bytes() for part in parts))
+        track = joined
+    return media_seconds(track)
 
 
 def create_take(root):
