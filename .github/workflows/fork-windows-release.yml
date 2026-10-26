@@ -11,10 +11,6 @@ on:
   push:
     tags:
       - "v*"
-    # shortcut: lets the spike run before this file is on the default branch
-    # (workflow_dispatch needs that); drop once it merges to main.
-    branches:
-      - "spike/s3-windows-build"
 
 permissions:
   contents: write
