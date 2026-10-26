@@ -302,7 +302,15 @@ impl Mirror {
         walk(&self.take, &self.outbox, &mut files);
         let mut expected: Vec<String> = files.iter().map(|path| self.relative(path)).collect();
         expected.sort_by_key(|relative| (upload_rank(relative), relative.clone()));
-        let stop = json!({ "stopped_at_unix_ms": stopped_at_unix_ms, "expected_files": expected });
+        // Hashed as they stand at stop, so the VM can trust a partial take (film A-9.4).
+        let listed: Vec<_> = expected
+            .iter()
+            .filter_map(|relative| {
+                let (size, sha256) = hash_file(&self.take.join(relative)).ok()?;
+                Some(json!({ "path": relative, "size": size, "sha256": sha256 }))
+            })
+            .collect();
+        let stop = json!({ "stopped_at_unix_ms": stopped_at_unix_ms, "expected_files": listed });
         let stop = serde_json::to_vec_pretty(&stop).expect("JSON value serializes");
         let mut frozen = write_atomic(&self.outbox.join(STOP), &stop).is_ok();
         if let Err(error) = self.put(STOP, stop, remaining(deadline).min(Duration::from_secs(15))) {
@@ -340,7 +348,7 @@ impl Mirror {
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|path| path.as_str().map(String::from))
+            .filter_map(|file| file["path"].as_str().map(String::from))
             .collect();
         let mut backoff = Duration::from_secs(1);
         loop {
@@ -424,6 +432,12 @@ pub fn request(
         return Err(format!("{method} {}: {status}", url.path()));
     }
     Ok(bytes.to_vec())
+}
+
+fn hash_file(path: &Path) -> io::Result<(u64, String)> {
+    let mut hasher = sha2::Sha256::default();
+    let size = io::copy(&mut fs::File::open(path)?, &mut hasher)?;
+    Ok((size, hex::encode(sha2::Digest::finalize(hasher))))
 }
 
 fn remaining(deadline: Instant) -> Duration {
