@@ -447,9 +447,11 @@ def display_seconds(take, scratch):
     track = take / segment["display"]["path"]
     if track.is_dir():
         manifest = json.loads((track / "manifest.json").read_text())
+        # Cap's v5 m4s manifest lists "segments"; older ones list "fragments".
+        entries = manifest.get("segments", manifest.get("fragments"))
         joined = scratch / "display-joined.mp4"
         parts = [manifest.get("init_segment", "init.mp4")] + [
-            f["path"] for f in sorted(manifest["fragments"], key=lambda f: f["index"])
+            f["path"] for f in sorted(entries, key=lambda f: f["index"])
         ]
         joined.write_bytes(b"".join((track / part).read_bytes() for part in parts))
         track = joined
