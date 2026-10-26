@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "film/contracts/stop.schema.json",
+  "title": "stop",
+  "type": "object",
+  "required": [
+    "stopped_at_unix_ms",
+    "expected_files"
+  ],
+  "properties": {
+    "stopped_at_unix_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "expected_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "size",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "not": {
+              "pattern": "(^/|(^|/)\\.\\.(/|$))"
+            }
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "minItems": 0
+    }
+  }
+}

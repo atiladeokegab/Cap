@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "film/contracts/gate.schema.json",
+  "title": "gate",
+  "type": "object",
+  "required": [
+    "passed",
+    "rules"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string"
+    },
+    "passed": {
+      "type": "boolean"
+    },
+    "coverage": {
+      "type": "object"
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "unverified"
+            ]
+          },
+          "where": {
+            "type": "string"
+          },
+          "fix": {
+            "type": "string"
+          }
+        }
+      },
+      "minItems": 0
+    }
+  }
+}

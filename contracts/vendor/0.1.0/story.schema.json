@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "film/contracts/story.schema.json",
+  "title": "story",
+  "type": "object",
+  "required": [
+    "promise",
+    "spark",
+    "hero",
+    "chart",
+    "why_now",
+    "who_pays",
+    "ask",
+    "sentences"
+  ],
+  "properties": {
+    "promise": {
+      "type": "string",
+      "minLength": 1
+    },
+    "spark": {
+      "type": "string",
+      "minLength": 1
+    },
+    "hero": {
+      "type": "string",
+      "minLength": 1
+    },
+    "chart": {
+      "type": "string",
+      "minLength": 1
+    },
+    "why_now": {
+      "type": "string",
+      "minLength": 1
+    },
+    "who_pays": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ask": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sentences": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "text"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]*$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "shot_id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]*$"
+          }
+        }
+      },
+      "minItems": 1
+    }
+  }
+}
