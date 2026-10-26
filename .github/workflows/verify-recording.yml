@@ -184,7 +184,8 @@ jobs:
           jq 'length' "$FORK_DIR/events.json"
 
       # Uploads the finished take as the mirror does at stop, under
-      # takes/ci-<run>-<attempt>/. The config comes only from the secret, is
+      # ci/<run>-<attempt>/, never takes/: the film loop watches takes/ and would cut
+      # a CI take into a film. The config comes only from the secret, is
       # written to the runner's temp folder and never printed.
       - name: Mirror the take
         if: env.FORK_DRIVER != ''
@@ -198,7 +199,7 @@ jobs:
           fi
           config="$RUNNER_TEMP/mirror.json"
           printf '%s' "$CAP_MIRROR_CONFIG" \
-            | jq --arg p "takes/ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" '.prefix = $p' > "$config"
+            | jq --arg p "ci/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" '.prefix = $p' > "$config"
           take=$(find "$CAP_VERIFY_SCRATCH" -type d -name recording.cap | head -1)
           outbox="$RUNNER_TEMP/outbox"
           jq -n --arg c "$config" --arg t "$take" --arg o "$outbox" '{op: "scan", config: $c, take: $t, outbox: $o}' \
@@ -206,7 +207,7 @@ jobs:
           jq -n --arg c "$config" --arg t "$take" --arg o "$outbox" --argjson now "$(date +%s%3N)" \
             '{op: "stop", config: $c, take: $t, outbox: $o, stopped_at_unix_ms: $now, drain_timeout_ms: 120000}' \
             | "$FORK_DRIVER" | tee "$FORK_DIR/mirror-result.json"
-          echo "uploaded under takes/ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/"
+          echo "uploaded under ci/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/"
           rm -f "$config"
 
       - name: Upload take
