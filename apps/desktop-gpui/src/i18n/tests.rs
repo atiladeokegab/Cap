@@ -649,7 +649,7 @@ fn only_cjk_and_devanagari_catalogs_change_the_font_cascade() {
     );
 }
 
-/// Geist has no CJK or Devanagari glyphs, so those clusters are sized the way
+/// Inter has no CJK or Devanagari glyphs, so those clusters are sized the way
 /// the system faces set them: ideographs and kana are one em, Devanagari
 /// letters a little over half, vowel signs a third or nothing.
 fn missing_glyph_width(cluster: &str, size: f32) -> f32 {
@@ -676,9 +676,9 @@ fn missing_glyph_width(cluster: &str, size: f32) -> f32 {
 }
 
 /// Every string with a `max_px` budget, in every catalog, measured with the
-/// bundled Geist Medium (the widest weight these labels use). A translation
-/// over 92% of the budget fails (the system UI font differs from Geist by a
-/// few percent), unless English is already wider, which then is the limit.
+/// bundled Inter Medium (the shipped UI face, at the widest weight these
+/// labels use). A translation over 92% of the budget fails, unless English is
+/// already wider, which then is the limit.
 #[test]
 fn translations_fit_their_width_budgets() {
     use cosmic_text::{
@@ -687,12 +687,12 @@ fn translations_fit_their_width_budgets() {
 
     let fonts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts");
     let mut database = Database::new();
-    for name in ["Geist.ttf", "Geist-Medium.ttf"] {
+    for name in ["Inter-Regular.ttf", "Inter-Medium.ttf"] {
         database.load_font_data(std::fs::read(fonts.join(name)).unwrap());
     }
     let mut system = FontSystem::new_with_locale_and_db("en-US".into(), database);
     let attrs = Attrs::new()
-        .family(Family::Name("Geist"))
+        .family(Family::Name(crate::theme::UI_FONT))
         .weight(Weight::MEDIUM);
 
     let mut measure = |text: &str, size: f32| {
