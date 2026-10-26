@@ -49,6 +49,7 @@ repo.
 ### Known limitations
 
 - unused since the fork dropped the startup check (main.rs); delete with the updater if it never returns. (`apps/desktop-gpui/src/updates.rs`, `schedule_startup_check`)
+- the resume is seen when the actor acknowledges it, a little after the new segment's epoch, so its first titles read slightly late. (`apps/desktop-gpui/src/window_log.rs`, `set_paused`)
 <!-- fork:end -->
 
 Cap is the open source alternative to Loom. It gives you fast screen recording, polished local editing, instant share links, comments, transcripts, analytics, team workspaces, custom domains, custom S3 storage, and full self-hosting when you need complete control.
