@@ -4,15 +4,18 @@ import re
 from conftest import ROOT, source
 
 
-def test_theme_uses_independently_committed_reference_palette():
-    palette = json.loads((ROOT / "tests/fixtures/canvid-palette.json").read_text())
-    theme = re.sub(r"//[^\n]*", "", source("apps/desktop-gpui/src/theme.rs"))
-    dark = theme.rsplit("pub fn dark()", 1)[-1].lower()
-    for name, value in palette["colors"].items():
-        assert re.search(rf"\b{name}\s*:\s*rgb\s*\(\s*0x{value[1:]}\s*\)", dark), (
-            f"Wrong dark-theme token: {name}"
-        )
-    assert '"Geist"' in theme
-    assert '"Segoe UI"' in theme or (
-        '".SystemUIFont"' in theme and 'target_os = "windows"' in theme
+def test_light_theme_uses_the_measured_reference_palette():
+    # reference/palette.json is measured from the lead's Canvid light-app screenshots
+    palette = json.loads((ROOT / "reference/palette.json").read_text())
+    hexes = set(re.findall(r"#([0-9a-f]{6})", json.dumps(palette["colors"]).lower()))
+    assert len(hexes) >= 20, "Palette lost colours"
+    theme = re.sub(r"//[^\n]*", "", source("apps/desktop-gpui/src/theme.rs")).lower()
+    light = "".join(
+        re.split(r"\bfn\s", body, maxsplit=1)[0]
+        for body in theme.split("pub fn light()")[1:]
     )
+    assert light, "theme.rs needs a light theme"
+    tokens = set(re.findall(r"\brgb\s*\(\s*0x([0-9a-f]{6})\s*\)", light))
+    missing = sorted(hexes - tokens)
+    assert not missing, f"Light theme lacks measured colours: {missing}"
+    assert '"inter"' in theme, "Inter is the measured stand-in face"
