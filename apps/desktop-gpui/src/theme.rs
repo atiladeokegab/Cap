@@ -5,6 +5,10 @@
 //! `apps/desktop/src/styles/theme.css` (`:root.dark`, which outranks Radix's own
 //! `.dark`). The overridden ones are marked below -- they are *not* stock Radix,
 //! so regenerating this from a Radix crate would silently change the palette.
+//!
+//! This fork's palettes are the Canvid look instead, with its sizes in
+//! [`look`]: light is measured from Canvid's Windows screens (accent #4d66da),
+//! dark is a zinc-and-indigo counterpart (Canvid ships no dark screens).
 
 use std::sync::LazyLock;
 
@@ -17,14 +21,89 @@ use crate::i18n::Locale;
 use crate::platform::{self, ForcedAppearance, MaterialKind};
 use crate::store::AppTheme;
 
-/// The interface face: the platform's own UI font (SF Pro on macOS, Segoe UI
-/// on Windows) so text matches the system. Linux distros have no reliable
-/// equivalent, so they keep the bundled Geist.
-pub const UI_FONT: &str = if cfg!(any(target_os = "macos", target_os = "windows")) {
-    ".SystemUIFont"
-} else {
-    "Geist"
-};
+/// The interface face. Canvid draws in a geometric grotesk (Inter is the
+/// usual stand-in); the bundled Geist is the closest face this app embeds, so
+/// it is used on every platform rather than Segoe UI or SF Pro.
+pub const UI_FONT: &str = "Geist";
+
+/// The Canvid look's sizes: one type scale, spacing step and radius set shared
+/// by the start screen, the capture bar and the editor, so the three windows
+/// read as one product. Colours live on [`Theme`]; a pass from the reference
+/// screenshots should only need to edit values here and there.
+pub mod look {
+    /// The start screen's question (Canvid's 44px heading, scaled to the
+    /// 330px window).
+    pub const HEADING_SIZE: f32 = 17.;
+    pub const HEADING_LINE: f32 = 22.;
+    /// Section headings and secondary captions.
+    pub const CAPTION_SIZE: f32 = 11.;
+    pub const CAPTION_LINE: f32 = 14.;
+    /// Card and button labels.
+    pub const LABEL_SIZE: f32 = 12.;
+    pub const LABEL_LINE: f32 = 16.;
+    /// Row text and the capture bar's timer.
+    pub const BODY_SIZE: f32 = 13.;
+    pub const BODY_LINE: f32 = 18.;
+
+    /// The spacing steps; everything is a multiple of 4.
+    pub const SPACE_1: f32 = 4.;
+    pub const SPACE_2: f32 = 8.;
+
+    /// Buttons and small controls.
+    pub const RADIUS_CONTROL: f32 = 8.;
+    /// The start screen's target cards.
+    pub const RADIUS_CARD: f32 = 16.;
+    /// The editor's floating panels.
+    pub const RADIUS_PANEL: f32 = 14.;
+    /// Short cards and wide buttons: "Take a Screenshot", Camera Only.
+    pub const RADIUS_TILE: f32 = 10.;
+
+    /// The start screen's three target cards. Sized so the cards and the
+    /// device rows fit the 330x435 main window without scrolling.
+    pub const TARGET_CARD_HEIGHT: f32 = 66.;
+    pub const TARGET_ICON: f32 = 24.;
+    /// The Display and Window cards' corner chevron.
+    pub const TARGET_CHEVRON: f32 = 20.;
+    /// The "Take a Screenshot" and Camera Only row under the cards.
+    pub const SECONDARY_CARD_HEIGHT: f32 = 40.;
+    pub const SECONDARY_ICON: f32 = 16.;
+
+    /// The capture bar: a floating pill.
+    pub const BAR_HEIGHT: f32 = 52.;
+    pub const BAR_RADIUS: f32 = BAR_HEIGHT / 2.;
+    /// The shell's opacity over the desktop.
+    pub const BAR_OPACITY: f32 = 0.9;
+    /// The red stop disc and its white square. The bar's window is 320px
+    /// wide (`app_windows::CONTROLS_WIDTH`), so five 28px buttons plus the
+    /// handle leave the timer about 60px.
+    pub const BAR_STOP: f32 = 30.;
+    pub const BAR_STOP_GLYPH: f32 = 11.;
+    pub const BAR_BUTTON: f32 = 28.;
+    pub const BAR_ICON: f32 = 18.;
+    /// The drag handle on the trailing edge.
+    pub const BAR_HANDLE: f32 = 24.;
+}
+
+/// The capture bar's lift. Kept shallow: the bar sits 12px from the bottom of
+/// its own transparent window, and a deeper shadow would be clipped there.
+pub fn bar_shadow() -> Vec<BoxShadow> {
+    vec![
+        BoxShadow {
+            color: gpui::hsla(0., 0., 0., 0.5),
+            offset: point(px(0.), px(4.)),
+            blur_radius: px(12.),
+            spread_radius: px(-2.),
+            inset: false,
+        },
+        BoxShadow {
+            color: gpui::hsla(0., 0., 0., 0.4),
+            offset: point(px(0.), px(2.)),
+            blur_radius: px(4.),
+            spread_radius: px(-2.),
+            inset: false,
+        },
+    ]
+}
 
 /// Faces to try before the system cascade, per catalog. The system fallback
 /// follows the OS language, so without these Japanese on a Chinese system (or
@@ -508,22 +587,26 @@ pub struct EditorPalette {
 impl EditorPalette {
     pub fn light() -> Self {
         Self {
-            window: rgb(0xf1f1f3),
-            card: rgb(0xffffff),
-            card_2: rgb(0xf6f6f7),
-            stage: rgb(0xe9e9ec),
-            line: rgba(0x00000013),
-            line_strong: rgba(0x0000001f),
-            text_1: rgb(0x1c1c1e),
-            text_2: rgb(0x6e6e75),
-            text_3: rgb(0xa0a0a8),
-            ctl: rgba(0x0000000b),
-            ctl_hover: rgba(0x00000013),
-            ctl_active: rgba(0x0000001c),
-            accent: rgb(0x007aff),
-            accent_2: rgb(0x2b8cff),
-            playhead: rgb(0xff3b30),
-            thumb: rgb(0xffffff),
+            // The Canvid look: floating #fbfafb panels on the #f3f3f3 window.
+            window: rgb(0xf3f3f3),
+            card: rgb(0xfbfafb),
+            card_2: rgb(0xf0f0f3),
+            stage: rgb(0xededf0),
+            // Solid hairlines and fills, as Canvid draws them: panel border
+            // #d3d4db, segment track #ecebef, rail tile #e5e5ea.
+            line: rgb(0xd3d4db),
+            line_strong: rgb(0xc7c7ce),
+            text_1: rgb(0x1d2024),
+            text_2: rgb(0x6b6e72),
+            // Times and helper text.
+            text_3: rgb(0x8a8c90),
+            ctl: rgb(0xecebef),
+            ctl_hover: rgb(0xe5e5ea),
+            ctl_active: rgb(0xd6d5dd),
+            accent: rgb(0x4d66da),
+            accent_2: rgb(0x6e80da),
+            playhead: rgb(0x4092fd),
+            thumb: rgb(0xfcfcfd),
             seg_tint: 0.13,
             seg_line: 0.34,
             seg_label_base: rgb(0x000000),
@@ -537,22 +620,24 @@ impl EditorPalette {
 
     pub fn dark() -> Self {
         Self {
-            window: rgb(0x131315),
-            card: rgb(0x1b1b1e),
-            card_2: rgb(0x202024),
-            stage: rgb(0x121214),
+            // The Canvid look: the same zinc surfaces and indigo accent as
+            // `Theme::dark`, so the editor and the start screen match.
+            window: rgb(0x09090b),
+            card: rgb(0x121215),
+            card_2: rgb(0x1c1c20),
+            stage: rgb(0x0c0c0e),
             line: rgba(0xffffff14),
             line_strong: rgba(0xffffff21),
             text_1: rgb(0xf4f4f5),
-            text_2: rgb(0x9a9aa3),
-            text_3: rgb(0x62626a),
+            text_2: rgb(0xa1a1aa),
+            text_3: rgb(0x71717a),
             ctl: rgba(0xffffff0f),
             ctl_hover: rgba(0xffffff17),
             ctl_active: rgba(0xffffff21),
-            accent: rgb(0x0a84ff),
-            accent_2: rgb(0x3d9bff),
-            playhead: rgb(0xff453a),
-            thumb: rgb(0xe8e8ea),
+            accent: rgb(0x6366f1),
+            accent_2: rgb(0x818cf8),
+            playhead: rgb(0xef4444),
+            thumb: rgb(0xf4f4f5),
             seg_tint: 0.20,
             seg_line: 0.42,
             seg_label_base: rgb(0xffffff),
@@ -731,28 +816,32 @@ impl Theme {
             material: None,
             editor: EditorPalette::light(),
 
-            gray_1: rgb(0xfcfcfc),
-            gray_2: rgb(0xf9f9f9),
-            gray_3: rgb(0xf0f0f0),
-            gray_4: rgb(0xe8e8e8),
-            gray_5: rgb(0xe0e0e0),
-            gray_6: rgb(0xd9d9d9),
-            gray_7: rgb(0xcecece),
-            gray_8: rgb(0xbbbbbb),
-            gray_9: rgb(0x8d8d8d),
-            gray_10: rgb(0x838383),
-            gray_11: rgb(0x646464),
-            gray_12: rgb(0x202020),
+            // The Canvid look, measured from Canvid's own Windows screens:
+            // window #f3f3f3, card #f8f8f9, control #f0f0f3, hairline #cfcfd6.
+            gray_1: rgb(0xf3f3f3),
+            gray_2: rgb(0xf8f8f9),
+            gray_3: rgb(0xf0f0f3),
+            gray_4: rgb(0xededf0),
+            gray_5: rgb(0xe5e5ea),
+            gray_6: rgb(0xcfcfd6),
+            gray_7: rgb(0xc7c7ce),
+            gray_8: rgb(0xc6c6c9),
+            gray_9: rgb(0x909294),
+            gray_10: rgb(0x6b6e72),
+            gray_11: rgb(0x55575a),
+            gray_12: rgb(0x1d2024),
 
-            blue_3: rgb(0xe6f4fe),
-            blue_4: rgb(0xd5efff),
-            blue_5: rgb(0xc2e5ff),
-            blue_6: rgb(0xacd8fc),
-            blue_8: rgb(0x5eb1ef),
-            blue_9: rgb(0x0090ff),
-            blue_10: rgb(0x0588f0),
-            blue_11: rgb(0x0d74ce),
-            blue_12: rgb(0x113264),
+            // Canvid's accent #4d66da in place of Radix blue; the tints and
+            // shades around it are derived, not measured.
+            blue_3: rgb(0xeef0fb),
+            blue_4: rgb(0xe3e7f9),
+            blue_5: rgb(0xd5dbf6),
+            blue_6: rgb(0xc3cbf2),
+            blue_8: rgb(0x8d9de8),
+            blue_9: rgb(0x4d66da),
+            blue_10: rgb(0x4359c4),
+            blue_11: rgb(0x3a4fb8),
+            blue_12: rgb(0x1f2a66),
 
             red_2: rgb(0xfff7f7),
             red_3: rgb(0xfeebec),
@@ -765,8 +854,8 @@ impl Theme {
             amber_6: rgb(0xf3d673),
             amber_11: rgb(0xab6400),
 
-            blue_100: rgb(0xadc9ff),
-            blue_500: rgb(0x3666c5),
+            blue_100: rgb(0xc3cbf2),
+            blue_500: rgb(0x4d66da),
             red_300: rgb(0xff4766),
 
             // `theme.css:38-44`.
@@ -776,7 +865,7 @@ impl Theme {
             gray_400_legacy: rgb(0x868e9f),
             gray_500_legacy: rgb(0x161b26),
 
-            text_primary: rgba(0x12161ff2),
+            text_primary: rgba(0x1d2024f2),
         }
     }
 
@@ -786,53 +875,56 @@ impl Theme {
             material: None,
             editor: EditorPalette::dark(),
 
-            // gray 1-6 and 11 are the theme.css overrides, not stock Radix.
-            gray_1: rgb(0x111111),
-            gray_2: rgb(0x1c1c1c),
-            gray_3: rgb(0x282828),
-            gray_4: rgb(0x323232),
-            gray_5: rgb(0x3a3a3a),
-            gray_6: rgb(0x444444),
-            gray_7: rgb(0x484848),
-            gray_8: rgb(0x606060),
-            gray_9: rgb(0x6e6e6e),
-            gray_10: rgb(0x7b7b7b),
-            gray_11: rgb(0xa1a1a1),
-            gray_12: rgb(0xeeeeee),
+            // The Canvid look's dark counterpart: zinc surfaces, indigo
+            // accent, crimson record. gray 5 and 9 sit between their
+            // neighbours.
+            gray_1: rgb(0x09090b),
+            gray_2: rgb(0x121215),
+            gray_3: rgb(0x1c1c20),
+            gray_4: rgb(0x27272a),
+            gray_5: rgb(0x2e2e33),
+            gray_6: rgb(0x27272a),
+            gray_7: rgb(0x3f3f46),
+            gray_8: rgb(0x3f3f46),
+            gray_9: rgb(0x52525b),
+            gray_10: rgb(0x71717a),
+            gray_11: rgb(0xa1a1aa),
+            gray_12: rgb(0xf4f4f5),
 
-            blue_3: rgb(0x0d2847),
-            blue_4: rgb(0x003362),
-            blue_5: rgb(0x004074),
-            blue_6: rgb(0x104d87),
-            blue_8: rgb(0x2870bd),
-            blue_9: rgb(0x0090ff),
-            blue_10: rgb(0x3b9eff),
-            blue_11: rgb(0x70b8ff),
-            blue_12: rgb(0xc2e6ff),
+            // Indigo in place of Radix blue; 9 is the accent, 10 its pressed
+            // shade, 11 the accent text.
+            blue_3: rgb(0x1e1b4b),
+            blue_4: rgb(0x25215e),
+            blue_5: rgb(0x2c2873),
+            blue_6: rgb(0x312e81),
+            blue_8: rgb(0x4338ca),
+            blue_9: rgb(0x6366f1),
+            blue_10: rgb(0x4f46e5),
+            blue_11: rgb(0x818cf8),
+            blue_12: rgb(0xc7d2fe),
 
-            red_2: rgb(0x201314),
-            red_3: rgb(0x3b1219),
-            red_4: rgb(0x500f1c),
-            red_9: rgb(0xe5484d),
-            red_10: rgb(0xec5d5e),
-            red_11: rgb(0xff9592),
+            red_2: rgb(0x1a0f10),
+            red_3: rgb(0x2c1215),
+            red_4: rgb(0x450a0a),
+            red_9: rgb(0xef4444),
+            red_10: rgb(0xdc2626),
+            red_11: rgb(0xf87171),
 
             amber_3: rgb(0x302008),
             amber_6: rgb(0x5c3d05),
             amber_11: rgb(0xffca16),
 
-            blue_100: rgb(0x243352),
-            blue_500: rgb(0x0a84ff),
-            red_300: rgb(0xff4766),
+            blue_100: rgb(0x25215e),
+            blue_500: rgb(0x6366f1),
+            red_300: rgb(0xef4444),
 
-            // `theme.css:101-107`.
-            gray_200_legacy: rgb(0x282828),
-            gray_300_legacy: rgb(0x323232),
-            // `--gray-400: #a1a1a1` (`theme.css:105`).
-            gray_400_legacy: rgb(0xa1a1a1),
+            // The legacy steps track the zinc surfaces they stood in for.
+            gray_200_legacy: rgb(0x1c1c20),
+            gray_300_legacy: rgb(0x27272a),
+            gray_400_legacy: rgb(0xa1a1aa),
             gray_500_legacy: rgb(0xffffff),
 
-            text_primary: rgba(0xfffffff2),
+            text_primary: rgba(0xf4f4f5f2),
         }
     }
 
@@ -1173,11 +1265,10 @@ impl Theme {
         color
     }
 
-    /// Tailwind v4's stock `blue-600` -- the target-select overlay's highlight
-    /// wash (`bg-blue-600/40`). Not a Radix step and not one of the app's own
-    /// `--blue-*` overrides: the overlay reaches straight for the Tailwind
-    /// palette there.
-    pub const TARGET_HIGHLIGHT: u32 = 0x155dfc;
+    /// The target-select overlay's highlight wash (`bg-blue-600/40` upstream),
+    /// indigo-600 for the Canvid look. Not a Radix step: the overlay reaches
+    /// straight for the Tailwind palette there.
+    pub const TARGET_HIGHLIGHT: u32 = 0x4f46e5;
 
     /// `--macos-settings-accent: AccentColor` -- the selected sidebar icon and
     /// the checked toggle. `AccentColor` is the system-wide accent the user

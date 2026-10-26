@@ -15,7 +15,7 @@ use gpui::{
 use std::{cell::Cell, rc::Rc};
 
 use crate::i18n::tr;
-use crate::theme::LocaleFont as _;
+use crate::theme::{LocaleFont as _, look};
 use crate::{
     MAIN_WINDOW_WIDTH, app_windows, devices,
     devices::{CameraOption, DeviceSnapshot, DisplayOption, MicrophoneOption, WindowOption},
@@ -237,6 +237,18 @@ fn shadow(color: Hsla, y: f32, blur: f32, spread: f32, inset: bool) -> gpui::Box
 /// unblurred, keep it cheap on a window that repaints with the mic meter.
 fn glass_button<E: Styled>(element: E, theme: Theme, selected: bool) -> E {
     let dark = theme.is_dark();
+    // The Canvid look: flat cards with a hairline, an accent ring when
+    // selected. The gradient and inner highlight stay for macOS glass only.
+    if theme.material.is_none() {
+        return element
+            .bg(if selected {
+                Theme::with_alpha(theme.blue_9, 0.14)
+            } else {
+                theme.gray_2.into()
+            })
+            .border_1()
+            .border_color(if selected { theme.blue_9 } else { theme.gray_6 });
+    }
     let (top, bottom, rim) = match (selected, dark) {
         (false, false) => (
             gpui::hsla(0., 0., 1., 0.7),
@@ -281,8 +293,20 @@ fn glass_button<E: Styled>(element: E, theme: Theme, selected: bool) -> E {
 fn capture_hover_fill(theme: Theme, selected: bool) -> Hsla {
     if selected {
         Theme::with_alpha(theme.blue_9, 0.06)
+    } else if !theme.is_dark() && theme.material.is_none() {
+        // Canvid's light cards turn white under the pointer.
+        gpui::white()
     } else {
         glass_tint(theme, 0.04, 0.05)
+    }
+}
+
+/// Camera Only is a short tile beside "Take a Screenshot"; the rest are cards.
+fn target_radius(target: TargetType) -> f32 {
+    if target == TargetType::CameraOnly {
+        look::RADIUS_TILE
+    } else {
+        look::RADIUS_CARD
     }
 }
 
@@ -6450,57 +6474,75 @@ impl MainWindow {
             )
     }
 
+    /// The Canvid start screen: Display, Window and Area as three large cards,
+    /// then "Take a Screenshot" and Camera Only side by side underneath.
     fn render_targets(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
-            .gap(px(8.))
+            .gap(px(look::SPACE_2))
             .w_full()
             .flex_shrink_0()
+            // Canvid's start screen leads with one large, light question.
             .child(
                 div()
-                    .px(px(4.))
-                    .text_size(px(10.))
-                    .line_height(px(14.))
-                    .text_color(self.theme.gray_11)
+                    .w_full()
+                    .text_center()
+                    .text_size(px(look::HEADING_SIZE))
+                    .line_height(px(look::HEADING_LINE))
+                    .font_weight(FontWeight::NORMAL)
+                    .text_color(self.theme.gray_12)
                     .child(tr::main::target::heading()),
             )
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap(px(8.))
+                    .gap(px(look::SPACE_2))
                     .items_stretch()
                     .w_full()
                     .child(self.render_split_target(TargetType::Display, cx))
-                    .child(self.render_split_target(TargetType::Window, cx)),
+                    .child(self.render_split_target(TargetType::Window, cx))
+                    .child(self.render_target_tile(TargetType::Area, cx)),
             )
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap(px(8.))
+                    .gap(px(look::SPACE_2))
                     .items_stretch()
                     .w_full()
-                    .child(self.render_target_tile(TargetType::Area, cx))
+                    .child(self.render_take_screenshot())
                     .child(self.render_target_tile(TargetType::CameraOnly, cx)),
             )
     }
 
-    /// Display and Window are split controls: the tile plus a 28px
-    /// (`w-7`) chevron button, sharing one rounded border.
+    fn render_section_heading(&self, label: &'static str) -> impl IntoElement {
+        div()
+            .px(px(look::SPACE_1))
+            .text_size(px(look::CAPTION_SIZE))
+            .line_height(px(look::CAPTION_LINE))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(self.theme.gray_10)
+            .child(label)
+    }
+
+    /// Display and Window are split controls: the card arms the target, the
+    /// chevron in its corner opens the display or window list.
     fn render_split_target(&self, target: TargetType, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let selected = self.target == Some(target);
         let dropdown_id = SharedString::from(format!("{}-dropdown", target.label()));
 
         div()
+            .relative()
             .flex()
             .flex_1()
+            .h(px(look::TARGET_CARD_HEIGHT))
             .overflow_hidden()
-            .rounded(px(10.))
+            .rounded(px(look::RADIUS_CARD))
             .map(|this| glass_button(this, theme, selected))
-            .child(self.target_button_inner(target, true, cx))
+            .child(self.target_button_inner(target, cx))
             .child(
                 div()
                     .id(dropdown_id.clone())
@@ -6510,38 +6552,28 @@ impl MainWindow {
                         TargetType::Display => "Choose a display",
                         _ => "Choose a window",
                     })
+                    // Sits over the card's own button; occluding keeps a click
+                    // here from arming the target too.
+                    .occlude()
+                    .absolute()
+                    .top(px(look::SPACE_1))
+                    .right(px(look::SPACE_1))
                     .flex()
-                    .w(px(28.))
-                    .rounded_r(px(9.))
-                    .flex_shrink_0()
+                    .size(px(look::TARGET_CHEVRON))
+                    .rounded(px(look::RADIUS_CONTROL - 2.))
                     .items_center()
                     .justify_center()
                     .child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .top(px(10.))
-                            .bottom(px(10.))
-                            .w(px(1.))
-                            .bg(if selected {
-                                Theme::with_alpha(theme.blue_9, 0.25)
-                            } else {
-                                glass_tint(theme, 0.08, 0.1)
-                            }),
-                    )
-                    .relative()
-                    .child(
                         svg()
                             .path("icons/chevron-down.svg")
-                            .size(px(14.))
+                            .size(px(12.))
                             .text_color(if selected {
-                                theme.blue_10
+                                theme.blue_11
                             } else {
                                 theme.gray_10
                             }),
                     )
-                    .hover(move |style| style.bg(capture_hover_fill(theme, selected)))
-                    .active(move |style| style.bg(capture_press_fill(theme, selected)))
+                    .hover(move |style| style.bg(capture_press_fill(theme, selected)))
                     .tooltip(move |_, cx| {
                         ui::Tooltip::new(
                             &theme,
@@ -6560,7 +6592,8 @@ impl MainWindow {
             )
     }
 
-    /// Area and Camera Only are plain tiles with their own border.
+    /// Area is a plain card; Camera Only is the short card beside "Take a
+    /// Screenshot".
     fn render_target_tile(&self, target: TargetType, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let selected = self.target == Some(target);
@@ -6568,34 +6601,39 @@ impl MainWindow {
         div()
             .flex()
             .flex_1()
+            .h(px(if target == TargetType::CameraOnly {
+                look::SECONDARY_CARD_HEIGHT
+            } else {
+                look::TARGET_CARD_HEIGHT
+            }))
             .overflow_hidden()
-            .rounded(px(10.))
+            .rounded(px(target_radius(target)))
             .map(|this| glass_button(this, theme, selected))
-            .child(self.target_button_inner(target, false, cx))
+            .child(self.target_button_inner(target, cx))
     }
 
-    fn target_button_inner(
-        &self,
-        target: TargetType,
-        split: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn target_button_inner(&self, target: TargetType, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let selected = self.target == Some(target);
+        let compact = target == TargetType::CameraOnly;
         let icon_color = if selected {
-            theme.blue_10
-        } else {
-            theme.gray_10
-        };
-        let label_color = if selected {
             theme.blue_11
         } else {
             theme.gray_12
         };
+        let label_color = if selected {
+            theme.blue_12
+        } else {
+            theme.gray_11
+        };
 
         let icon = svg()
             .path(target.icon())
-            .size(px(20.))
+            .size(px(if compact {
+                look::SECONDARY_ICON
+            } else {
+                look::TARGET_ICON
+            }))
             .flex_shrink_0()
             .text_color(icon_color);
 
@@ -6606,10 +6644,8 @@ impl MainWindow {
             .aria_label(target.label())
             .aria_selected(selected)
             .flex()
-            .flex_1()
-            .py(px(8.))
-            .when(split, |this| this.rounded_l(px(9.)))
-            .when(!split, |this| this.rounded(px(9.)))
+            .size_full()
+            .rounded(px(target_radius(target) - 1.))
             .hover(move |style| style.bg(capture_hover_fill(theme, selected)))
             .active(move |style| style.bg(capture_press_fill(theme, selected)))
             .on_click(cx.listener(move |this, _, _window, cx| {
@@ -6624,20 +6660,84 @@ impl MainWindow {
                 cx.notify();
             }));
 
-        base.flex_col()
-            .items_center()
-            .justify_end()
-            .gap(px(4.))
-            // `pl-5` on the split controls when compact, to keep the icon
-            // optically centred against the chevron on the right.
-            .when(split, |this| this.pl(px(20.)))
-            .child(icon)
+        let label = div()
+            .min_w_0()
+            .truncate()
+            .text_size(px(look::LABEL_SIZE))
+            .line_height(px(look::LABEL_LINE))
+            .text_color(label_color)
+            .child(target.display_label());
+
+        if compact {
+            base.flex_row()
+                .items_center()
+                .justify_center()
+                .gap(px(look::SPACE_2))
+                .px(px(look::SPACE_2))
+                .child(icon)
+                .child(label)
+        } else {
+            base.flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(look::SPACE_2))
+                .child(icon)
+                .child(label)
+        }
+    }
+
+    /// "Take a Screenshot": the tray's action of the same name, which grabs
+    /// the display under the cursor.
+    fn render_take_screenshot(&self) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .flex()
+            .flex_1()
+            .h(px(look::SECONDARY_CARD_HEIGHT))
+            .overflow_hidden()
+            .rounded(px(look::RADIUS_TILE))
+            .map(|this| glass_button(this, theme, false))
             .child(
                 div()
-                    .text_size(px(12.))
-                    .line_height(px(16.))
-                    .text_color(label_color)
-                    .child(target.display_label()),
+                    .id("take-screenshot")
+                    .when(self.keyboard_nav, ui::keyboard_nav::stop)
+                    .role(gpui::Role::Button)
+                    .aria_label(tr::tray::take_screenshot())
+                    .flex()
+                    .flex_row()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(look::SPACE_2))
+                    .rounded(px(look::RADIUS_TILE - 1.))
+                    .hover(move |style| style.bg(capture_hover_fill(theme, false)))
+                    .active(move |style| style.bg(capture_press_fill(theme, false)))
+                    .child(
+                        svg()
+                            .path(Mode::Screenshot.icon())
+                            .size(px(look::SECONDARY_ICON))
+                            .flex_shrink_0()
+                            .text_color(theme.gray_12),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(look::LABEL_SIZE))
+                            .line_height(px(look::LABEL_LINE))
+                            .text_color(theme.gray_12)
+                            .child(tr::tray::take_screenshot()),
+                    )
+                    .on_click(|_, _, cx| {
+                        // Deferred: the capture hides this window, which is
+                        // still mid-update here.
+                        cx.defer(|cx| {
+                            let display = scap_targets::Display::get_containing_cursor()
+                                .unwrap_or_else(scap_targets::Display::primary);
+                            crate::screenshot::take_screenshot(
+                                ScreenCaptureTarget::Display { id: display.id() },
+                                cx,
+                            );
+                        });
+                    }),
             )
     }
 
@@ -6648,14 +6748,7 @@ impl MainWindow {
             .flex_col()
             .gap(px(8.))
             .w_full()
-            .child(
-                div()
-                    .px(px(4.))
-                    .text_size(px(10.))
-                    .line_height(px(14.))
-                    .text_color(self.theme.gray_11)
-                    .child(tr::main::device::heading()),
-            )
+            .child(self.render_section_heading(tr::main::device::heading()))
             .child(
                 div().flex().flex_col().child(
                     self.render_device_row(
@@ -6827,7 +6920,7 @@ impl MainWindow {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(14.))
+                    .text_size(px(look::BODY_SIZE))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.gray_12)
                     .truncate()

@@ -67,7 +67,7 @@ use gpui::{
     div, point, prelude::FluentBuilder, px, svg,
 };
 
-use crate::theme::LocaleFont as _;
+use crate::theme::{LocaleFont as _, look};
 use crate::{
     editor_audio::{AudioImportRequest, probe_audio_duration, replace_audio_asset},
     editor_edits::{self as edits, DragBounds, Hit, ProjectHistory, SPLIT_SNAP_PX, Selection},
@@ -11823,6 +11823,20 @@ impl Render for EditorWindow {
                                     .min_h_0()
                                     .px(px(8.))
                                     .min_h(px(layout.player_min_height))
+                                    // The settings rail, left of the player in
+                                    // the Canvid look. The 8px gutter is the
+                                    // wrapper's, not the sidebar view's: a
+                                    // margin inside a cached element is not
+                                    // honoured.
+                                    .child(
+                                        div().flex_none().h_full().pr(px(8.)).child(
+                                            self.sidebar_view.clone().cached(
+                                                StyleRefinement::default()
+                                                    .w(px(SIDEBAR_WIDTH))
+                                                    .h_full(),
+                                            ),
+                                        ),
+                                    )
                                     // The player card.
                                     .child(
                                         div()
@@ -11831,25 +11845,13 @@ impl Render for EditorWindow {
                                             .flex_1()
                                             .min_w_0()
                                             .min_h_0()
-                                            .rounded(px(12.))
+                                            .rounded(px(look::RADIUS_PANEL))
                                             .border_1()
                                             .border_color(self.card_line())
                                             .bg(self.panel_bg())
                                             .shadow(theme.editor.card_shadow())
                                             .overflow_hidden()
                                             .child(self.render_player(cx)),
-                                    )
-                                    // The 8px gutter is the wrapper's, not the
-                                    // sidebar view's: a margin inside a cached
-                                    // element is not honoured.
-                                    .child(
-                                        div().flex_none().h_full().pl(px(8.)).child(
-                                            self.sidebar_view.clone().cached(
-                                                StyleRefinement::default()
-                                                    .w(px(SIDEBAR_WIDTH))
-                                                    .h_full(),
-                                            ),
-                                        ),
                                     ),
                             )
                             // The timeline card: the wrapper is owned here so
