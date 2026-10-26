@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "film/contracts/shots.schema.json",
+  "title": "shots",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": [
+      "shot_id",
+      "segment",
+      "time_ms"
+    ],
+    "properties": {
+      "shot_id": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]*$"
+      },
+      "segment": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "time_ms": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "retake": {
+        "type": "boolean"
+      }
+    }
+  },
+  "minItems": 0
+}

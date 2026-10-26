@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "film/contracts/windows.schema.json",
+  "title": "windows",
+  "type": "object",
+  "required": [
+    "segment",
+    "time_ms",
+    "title",
+    "process"
+  ],
+  "properties": {
+    "segment": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "time_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "title": {
+      "type": "string"
+    },
+    "process": {
+      "type": "string"
+    }
+  }
+}

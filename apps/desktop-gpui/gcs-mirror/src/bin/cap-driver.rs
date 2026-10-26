@@ -1,11 +1,16 @@
 //! Test-only adapter for tests/acceptance: one JSON request on stdin
-//! (`op`: sign, scan, stop or resume), one JSON object on stdout.
+//! (`op`: sign, scan, stop, resume or shots), one JSON object on stdout.
+
+// The teleprompter's shot logic, std and serde only, straight from the app.
+#[allow(dead_code)]
+#[path = "../../../src/shots.rs"]
+mod shots;
 
 use cap_gcs_mirror::{Config, Mirror, sigv4};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::atomic::AtomicBool,
     time::{Duration, Instant},
 };
@@ -56,9 +61,82 @@ fn mirror(request: &Value) -> Result<Option<Mirror>, String> {
     Ok(Some(mirror))
 }
 
+/// Loads the shot list (inline, or a signed GET of `shotlist_url`), then
+/// plays `script` on an injected clock: the start gate armed at `epoch_ms`,
+/// each step at its `at_ms`. `elapsed_offset_ms` would only skew the bar's
+/// timer, which marks never read.
+fn shots_op(request: &Value) -> Result<Value, String> {
+    let loaded = match (&request["shotlist"], request["shotlist_url"].as_str()) {
+        (Value::Null, None) => None,
+        (Value::Null, Some(url)) => {
+            Some(fetch_shotlist(request, url).and_then(|b| shots::parse(&b)))
+        }
+        (list, _) => Some(shots::parse(list.to_string().as_bytes())),
+    };
+    let mut shots = match loaded {
+        None => return Ok(json!({ "mode": "free", "marks": [] })),
+        Some(Err(error)) => return Ok(json!({ "mode": "stock", "error": error, "marks": [] })),
+        Some(Ok(list)) => shots::Shots::new(list),
+    };
+    let base = Instant::now();
+    let at = |ms: f64| base + Duration::from_secs_f64(ms.max(0.) / 1000.);
+    let armed = at(request["epoch_ms"].as_f64().unwrap_or(0.));
+    let take = request["take"].as_str().map(PathBuf::from);
+    let mut clock = shots::ShotClock::default();
+    for step in request["script"].as_array().into_iter().flatten() {
+        let now = at(step["at_ms"].as_f64().unwrap_or(0.));
+        let action = match step["action"].as_str() {
+            Some("next") => shots::Action::Next,
+            Some("retake") => shots::Action::Retake,
+            Some("pause") => {
+                clock.pause();
+                continue;
+            }
+            Some("resume") => {
+                clock.resume(now);
+                continue;
+            }
+            other => return Err(format!("unknown action {other:?}")),
+        };
+        if let (Some(take), Some(time)) = (&take, clock.read(Some(armed), now)) {
+            shots.mark(action, take, time).map_err(|e| e.to_string())?;
+        }
+    }
+    // What the teleprompter shows for the shot on screen.
+    let shot = shots.current();
+    let lines: Vec<&str> = shot.lines.iter().map(|line| line.text.as_str()).collect();
+    Ok(json!({
+        "mode": "shots",
+        "current": { "shot_id": shot.shot_id, "title": shot.title, "on_screen": shot.on_screen, "lines": lines },
+        "marks": shots.marks(),
+    }))
+}
+
+fn fetch_shotlist(request: &Value, url: &str) -> Result<Vec<u8>, String> {
+    let url = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
+    let signer = sigv4::Key {
+        access_key: text(request, "access_key"),
+        secret_key: text(request, "secret_key"),
+        region: "auto",
+        service: "s3",
+    };
+    let client = reqwest::blocking::Client::new();
+    cap_gcs_mirror::request(
+        &client,
+        &signer,
+        "GET",
+        &url,
+        Vec::new(),
+        Duration::from_secs(10),
+    )
+}
+
 fn run(request: &Value) -> Result<Value, String> {
     if request["op"] == "sign" {
         return sign(request);
+    }
+    if request["op"] == "shots" {
+        return shots_op(request);
     }
     let Some(mut mirror) = mirror(request)? else {
         return Ok(json!({ "enabled": false }));

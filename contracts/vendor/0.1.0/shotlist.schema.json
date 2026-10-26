@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "film/contracts/shotlist.schema.json",
+  "title": "shotlist",
+  "type": "object",
+  "required": [
+    "shots"
+  ],
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "shots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "shot_id",
+          "title",
+          "lines"
+        ],
+        "properties": {
+          "shot_id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]*$"
+          },
+          "title": {
+            "type": "string"
+          },
+          "on_screen": {
+            "type": "string"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "sentence_id",
+                "text"
+              ],
+              "properties": {
+                "sentence_id": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_-]*$"
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "minItems": 0
+          }
+        }
+      },
+      "minItems": 1
+    }
+  }
+}
