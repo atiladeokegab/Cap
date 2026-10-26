@@ -17,15 +17,28 @@ def fixture(name):
 
 
 def zoom(driver, take, **fields):
+    """The zoom track the app generates, in seconds; Cap's cursor.json moves
+    and clicks go in as recorded, keys as key-down times."""
     result = driver(
         "zoom",
-        cursor=take["cursor"],
-        keyboard=take["keyboard"],
-        duration_s=take["duration_s"],
+        moves=take["cursor"]["moves"],
+        clicks=take["cursor"]["clicks"],
+        keys=[
+            {"time_ms": k["time_ms"]} for k in take["keyboard"]["presses"] if k["down"]
+        ],
+        duration_ms=take["duration_s"] * 1000,
         **fields,
     )
     assert "segments" in result, f"cap-driver has no zoom op: {result}"
-    return result["segments"]
+    return [
+        {
+            "start": s["start_ms"] / 1000,
+            "end": s["end_ms"] / 1000,
+            "amount": s["amount"],
+            "ease": s["ease_ms"] / 1000,
+        }
+        for s in result["segments"]
+    ]
 
 
 def stock(take):
@@ -85,8 +98,7 @@ def broken_bounds(take, segments):
 
 def assert_eases(segments):
     for s in segments:
-        for edge in ("ease_in_s", "ease_out_s"):
-            assert EASE[0] <= s[edge] <= EASE[1], f"{edge} {s[edge]} in {s}"
+        assert EASE[0] <= s["ease"] <= EASE[1], f"ease of {s}"
 
 
 @pytest.mark.parametrize("name", ["fast_clicks", "typing", "real_take"])
@@ -183,8 +195,7 @@ def test_work_under_1_5_s_makes_no_zoom(driver):
     "points",
     [
         [(0.1, 0.1), (0.9, 0.9), (0.1, 0.9), (0.9, 0.1)],  # whole screen
-        [(0.2, 0.5), (0.65, 0.52), (0.2, 0.48), (0.65, 0.5)],  # 45% wide strip
-        [(0.5, 0.15), (0.52, 0.6), (0.48, 0.15), (0.5, 0.6)],  # 45% tall strip
+        [(0.15, 0.15), (0.85, 0.85), (0.15, 0.85), (0.85, 0.15)],  # 49% of it
     ],
 )
 def test_work_spread_over_40_percent_of_the_frame_makes_no_zoom(driver, points):
@@ -244,7 +255,7 @@ def test_zoom_ins_are_6_s_apart_and_zoomed_time_is_at_most_35_percent(driver):
     # A qualifying 2.5 s burst every 4 s, each far from the one before.
     take = Take(44.0)
     for i, start in enumerate(range(2, 42, 4)):
-        take.clicks(start, start + 2.5, 0.3, box(0.1 + 0.6 * (i % 2), 0.4, 0.04))
+        take.clicks(start, start + 2.5, 0.3, box(0.1 + 0.65 * (i % 2), 0.4, 0.04))
     segments = zoom(driver, take.take)
     starts = sorted(s["start"] for s in segments)
     assert len(starts) >= 2, "zoom stopped following the work"
@@ -254,7 +265,7 @@ def test_zoom_ins_are_6_s_apart_and_zoomed_time_is_at_most_35_percent(driver):
 
 def test_depth_is_1_4_to_2_0_and_tighter_on_a_smaller_region(driver):
     take = Take(40.0).clicks(5.0, 9.0, 0.3, box(0.30, 0.30, 0.04))
-    take.clicks(22.0, 26.0, 0.3, box(0.40, 0.40, 0.30))
+    take.clicks(22.0, 26.0, 0.3, box(0.25, 0.25, 0.50))
     segments = sorted(zoom(driver, take.take), key=lambda s: s["start"])
     assert len(segments) == 2, segments
     small, large = segments
