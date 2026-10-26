@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from conftest import shotlist, validate_contract
 
 
@@ -28,5 +29,7 @@ def test_shotlist_loads_content_and_malformed_input_falls_back(driver, xml_serve
     assert fetched["current"] == result["current"]
     assert any(method == "GET" for method, *_ in xml_server.requests)
     for invalid in ({}, {"shots": []}, {"shots": [{"shot_id": 17}]}):
+        with pytest.raises(AssertionError, match="ValidationError"):
+            validate_contract("shotlist", invalid)
         rejected = driver("shots", shotlist=invalid, epoch_ms=50000, script=[])
         assert rejected["mode"] == "stock" and rejected["error"]

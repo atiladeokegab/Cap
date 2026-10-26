@@ -40,7 +40,9 @@ def source(path):
 
 def validate_contract(name, value, version=None):
     if version is None:
-        assert (ROOT / "contracts/vendor").is_dir(), "Missing released vendored contracts"
+        assert (ROOT / "contracts/vendor").is_dir(), (
+            "Missing released vendored contracts"
+        )
         releases = [
             p
             for p in (ROOT / "contracts/vendor").iterdir()
