@@ -440,8 +440,7 @@ async fn finalize_studio(
     let claim_progress = progress.clone();
     let completed = tokio::task::spawn_blocking(move || {
         // Before the remux deletes the fragment folders the mirror reads.
-        crate::gcs_mirror::stop(&project_path)
-            .map_err(|error| anyhow!("Mirror freeze failed; local files preserved: {error}"))?;
+        crate::gcs_mirror::stop(&project_path);
         if needs_remux {
             ensure_finalization_storage(&project_path)?;
         }

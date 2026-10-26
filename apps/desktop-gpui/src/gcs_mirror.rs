@@ -68,20 +68,22 @@ fn stopped_at_unix_ms(gate: Option<&cap_recording::RecordingStartGate>) -> u64 {
 
 /// Runs the stop sequence for `take`; it must run before Cap's remux. Blocks
 /// until the take is frozen into the outbox, then for the drain (about
-/// 120 s); uploads still pending carry on in the background. `Err` means the
-/// freeze failed, so the remux must not delete the fragments.
-pub fn stop(take: &Path) -> Result<(), String> {
+/// 120 s); uploads still pending carry on in the background. A failed freeze
+/// only skips mirroring this take: Cap's own recording always finishes (D10).
+pub fn stop(take: &Path) {
     let entry = {
         let mut running = RUNNING
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(index) = running.iter().position(|entry| entry.take == take) else {
-            return Ok(());
+            return;
         };
         running.remove(index)
     };
     let at = stopped_at_unix_ms(entry.gate.as_ref());
-    entry.worker.stop(at, STOP_DRAIN)
+    if let Err(error) = entry.worker.stop(at, STOP_DRAIN) {
+        tracing::error!(%error, take = %take.display(), "Mirror skipped this take; see outbox/mirror-failed.json");
+    }
 }
 
 /// After a restart, finishes uploading every take whose stop ran but whose

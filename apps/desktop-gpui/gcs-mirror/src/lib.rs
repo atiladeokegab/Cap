@@ -34,6 +34,8 @@ const AUDIO_DELTA: u64 = 256 * 1024;
 const STOP: &str = "stop.json";
 const MANIFEST: &str = "take-manifest.json";
 const LEDGER: &str = "uploaded.jsonl";
+/// Written instead of `stop.json` when the freeze fails.
+const FAILED: &str = "mirror-failed.json";
 
 /// The local config file in the app data folder; the mirror is off without it.
 #[derive(Clone, Deserialize)]
@@ -301,9 +303,23 @@ impl Mirror {
 
     /// Freezes the whole take into the outbox and writes `stop.json` listing
     /// every frozen file with its size and SHA-256. Local only, so Cap's
-    /// remux may run once it returns `Ok`; any file it cannot stage or hash
-    /// is an error and no `stop.json` is written, so no manifest can follow.
+    /// remux may run once it returns. Any file it cannot stage or hash fails
+    /// it: no `stop.json` is written, so no manifest can follow, and
+    /// `mirror-failed.json` in the outbox says why. Cap's take is untouched.
     pub fn freeze(&mut self, stopped_at_unix_ms: u64) -> Result<(), String> {
+        let frozen = self.stage(stopped_at_unix_ms);
+        if let Err(error) = &frozen {
+            tracing::error!(%error, take = %self.take.display(), "Mirror freeze failed; this take is not mirrored");
+            let marker = json!({ "stopped_at_unix_ms": stopped_at_unix_ms, "error": error });
+            let marker = serde_json::to_vec_pretty(&marker).expect("JSON value serializes");
+            if let Err(error) = write_atomic(&self.outbox.join(FAILED), &marker) {
+                tracing::error!(%error, "Could not write {FAILED}");
+            }
+        }
+        frozen
+    }
+
+    fn stage(&mut self, stopped_at_unix_ms: u64) -> Result<(), String> {
         let mut files = vec![];
         walk(&self.take, &self.outbox, &mut files).map_err(|e| format!("list take: {e}"))?;
         let mut expected: Vec<String> = files.iter().map(|path| self.relative(path)).collect();
@@ -487,10 +503,10 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Runs the stop sequence. Blocks, with no time limit, until the take is
-    /// frozen into the outbox: `Err` means it is not, so the caller must keep
-    /// Cap's source files (no remux). Then waits for the drain for about
-    /// `drain`; uploads still pending carry on in the background.
+    /// Runs the stop sequence. Blocks, with no time limit, until the freeze
+    /// is over: `Err` means this take is not mirrored (`mirror-failed.json`
+    /// says why), and Cap carries on as without a mirror. Then waits for the
+    /// drain for about `drain`; uploads still pending carry on in the background.
     pub fn stop(self, stopped_at_unix_ms: u64, drain: Duration) -> Result<(), String> {
         self.stopping.store(true, Ordering::Relaxed);
         let (frozen, frozen_rx) = mpsc::channel();
@@ -527,7 +543,7 @@ struct StopFile {
 /// A plain relative path inside the take that is none of the mirror's own files.
 fn inside(relative: &str) -> bool {
     let path = Path::new(relative);
-    ![STOP, MANIFEST, LEDGER].contains(&relative)
+    ![STOP, MANIFEST, LEDGER, FAILED].contains(&relative)
         && path.components().next().is_some()
         && path
             .components()
