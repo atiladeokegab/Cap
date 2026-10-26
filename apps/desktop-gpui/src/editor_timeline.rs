@@ -5294,7 +5294,7 @@ mod tests {
                             - rounded_corner_inset(
                                 local_x,
                                 width as f64,
-                                (width as f64 / 2.).min(8.),
+                                (width as f64 / 2.).min(f64::from(SEGMENT_RADIUS)),
                             );
                         assert!(
                             y <= bottom + 0.05,

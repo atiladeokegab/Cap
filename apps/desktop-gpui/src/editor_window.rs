@@ -13114,7 +13114,7 @@ mod tests {
         let layout = EditorVerticalLayout::new(652., DEFAULT_TIMELINE_HEIGHT);
         assert_eq!(layout.player_min_height, MIN_PLAYER_HEIGHT);
         assert_eq!(layout.timeline_height, DEFAULT_TIMELINE_HEIGHT);
-        assert_eq!(editor_player_width(992.), 550.);
+        assert_eq!(editor_player_width(992.), 550. - SIDEBAR_RAIL_WIDTH);
     }
 
     #[test]
@@ -13197,7 +13197,7 @@ mod tests {
         assert!(!compact_header_controls(992., false, true));
         assert!(compact_header_controls(800., true, false));
         assert!(compact_header_controls(800., false, true));
-        assert_eq!(editor_player_width(800.), 358.);
+        assert_eq!(editor_player_width(800.), 358. - SIDEBAR_RAIL_WIDTH);
     }
 
     fn open_sidebar_menu_for_test(
