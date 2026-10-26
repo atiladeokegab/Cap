@@ -136,7 +136,9 @@ impl std::fmt::Display for RecordMode {
 pub struct RecordStart {
     #[command(flatten)]
     params: RecordParams,
-    /// Record in the background and return immediately; stop later with `cap record stop`
+    /// Record in the background and return immediately; stop later with `cap record stop`. The
+    /// stopped take keeps Cap's fragments (status NeedsRemux) for uploading whole; `cap export`
+    /// remuxes them.
     #[arg(long)]
     detach: bool,
     /// Output format for status events
@@ -224,7 +226,7 @@ async fn run_foreground(params: RecordParams, format: OutputFormat) -> Result<()
         },
     ) {
         if let Ok(completed) = actor.stop().await {
-            let _ = finalize_completed(completed).await;
+            let _ = finalize_completed(completed, true).await;
         }
         return Err(error);
     }
@@ -233,7 +235,7 @@ async fn run_foreground(params: RecordParams, format: OutputFormat) -> Result<()
         println!("Press Enter to stop (or send SIGINT/SIGTERM)");
     }
 
-    let completed = finalize(actor, params.duration, interactive, None).await?;
+    let completed = finalize(actor, params.duration, interactive, None, true).await?;
     crate::automation::run_recording_finished(
         completed.project_path(),
         automation_mode(params.mode),
@@ -440,7 +442,8 @@ async fn session_worker(params: RecordParams, recording_id: &str) -> Result<(), 
     })?;
 
     let stop_path = session::stop_file(recording_id)?;
-    let completed = finalize(actor, params.duration, false, Some(&stop_path)).await?;
+    // A detached take is the agent recorder's: the film ingests Cap's fragments, so leave them.
+    let completed = finalize(actor, params.duration, false, Some(&stop_path), false).await?;
     crate::automation::run_recording_finished(
         completed.project_path(),
         automation_mode(params.mode),
@@ -959,13 +962,14 @@ fn shareable_content_display_ids(
 /// otherwise drop the actor without writing recording-meta.json (`ActorHandle` has no `Drop`),
 /// leaving an unrecoverable .cap; catch it and best-effort finalize so the recording is recoverable.
 ///
-/// Studio recordings are fragmented while recording, so a graceful stop finalizes those fragments
-/// before the `.cap` is returned.
+/// Studio recordings are fragmented while recording, so with `remux` a graceful stop finalizes those
+/// fragments into progressive files before the `.cap` is returned.
 async fn finalize(
     actor: ActorHandle,
     duration: Option<f64>,
     interactive: bool,
     stop_file: Option<&Path>,
+    remux: bool,
 ) -> Result<CompletedRecording, String> {
     let outcome = std::panic::AssertUnwindSafe(async {
         finalize_after_stop_trigger(
@@ -974,7 +978,7 @@ async fn finalize(
                 result => result.map_err(|error| error.to_string()),
             }),
             wait_for_stop(duration, interactive, stop_file),
-            async { finalize_completed(actor.stop().await?).await },
+            async { finalize_completed(actor.stop().await?, remux).await },
         )
         .await
     })
@@ -988,7 +992,7 @@ async fn finalize(
                 .stop()
                 .await
                 .map_err(|e| format!("recording panicked; finalize failed: {e}"))?;
-            finalize_completed(completed).await
+            finalize_completed(completed, remux).await
         }
     }
 }
@@ -1010,8 +1014,10 @@ async fn finalize_after_stop_trigger<T>(
 
 async fn finalize_completed(
     mut completed: CompletedRecording,
+    remux: bool,
 ) -> Result<CompletedRecording, String> {
     match &mut completed {
+        CompletedRecording::Studio(_) if !remux => {}
         CompletedRecording::Studio(recording) => {
             let project_path = recording.project_path.clone();
             tokio::task::spawn_blocking(move || {
