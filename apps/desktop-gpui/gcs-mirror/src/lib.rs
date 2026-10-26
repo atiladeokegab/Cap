@@ -64,6 +64,67 @@ impl Config {
             .inspect_err(|error| tracing::warn!(%error, "Mirror config is unreadable; mirror off"))
             .ok()
     }
+
+    /// When `path` is missing, moves a downloaded config from `downloads` into
+    /// it: `mirror.json`, else the newest browser-renamed `mirror*.json`. Only
+    /// a file that parses is taken, it is copied then removed so no secret is
+    /// left behind, and an existing `path` is never overwritten. Values are
+    /// never logged.
+    pub fn adopt(path: &Path, downloads: &Path) {
+        if path.exists() {
+            return;
+        }
+        let plain = downloads.join("mirror.json");
+        let found = if plain.is_file() {
+            plain
+        } else {
+            let newest = fs::read_dir(downloads)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    name.starts_with("mirror") && name.ends_with(".json")
+                })
+                .max_by_key(|entry| entry.metadata().and_then(|meta| meta.modified()).ok());
+            let Some(entry) = newest else {
+                return;
+            };
+            entry.path()
+        };
+        let Ok(bytes) = fs::read(&found) else {
+            return;
+        };
+        let valid = serde_json::from_slice::<Self>(&bytes).is_ok_and(|config| {
+            !config.bucket.is_empty()
+                && !config.access_key.is_empty()
+                && !config.secret_key.is_empty()
+        });
+        if !valid {
+            // The parse error can quote a value, so it is not logged.
+            tracing::warn!(file = %found.display(), "Downloaded mirror config is invalid (needs bucket, hmac_access_id, hmac_secret); left where it is");
+            return;
+        }
+        let written = path
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+            })
+            .and_then(|mut file| file.write_all(&bytes));
+        if let Err(error) = written {
+            tracing::warn!(%error, to = %path.display(), "Could not move the downloaded mirror config");
+            return;
+        }
+        if let Err(error) = fs::remove_file(&found) {
+            tracing::warn!(%error, file = %found.display(), "Mirror config copied, but the download could not be removed");
+            return;
+        }
+        tracing::info!(from = %found.display(), to = %path.display(), "Moved the downloaded mirror config into app data");
+    }
 }
 
 #[derive(Debug)]
