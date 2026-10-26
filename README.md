@@ -31,11 +31,15 @@
 <!-- fork:start (written by docs/architecture/c4.py) -->
 ## This fork
 
-A fork of Cap for recording product demos that are turned into edited films. It adds a teleprompter
-with shot marks (`shots.json`), a foreground-window log (`windows.jsonl`), live upload of each closed
-fragment to S3-compatible storage, and `cap events --json`. Every time it writes is on the take's
-start-gate clock, the one `cursor.json` uses. Upload settings live in a local config file, never in
-this repo.
+A fork of Cap for recording product demos that a film pipeline turns into edited films. The desktop
+app adds a shot list in the teleprompter, read from the bucket (or a local file), with Next shot and
+Retake on global hotkeys that write shot marks to the take's `shots.json`; a foreground-window log on
+Windows (`windows.jsonl`); an upload mirror that streams each studio take to S3-compatible storage
+while it records, with `take-manifest.json` last; and a light restyle. The CLI adds
+`cap events <take> --json`. Every time the fork writes is on the take's start-gate clock, the one
+`cursor.json` uses. GitHub Actions builds an unsigned Windows installer and records a real Windows
+fixture take. Upload settings live in a local `mirror.json` in the app data folder, never in this
+repo.
 
 ![C4 context](docs/architecture/c4_context.png)
 ![C4 container](docs/architecture/c4_container.png)
@@ -44,7 +48,7 @@ this repo.
 
 ### Known limitations
 
-- unused since the fork dropped the startup check (main.rs); delete with the updater if it never returns. (`apps/desktop-gpui/src/updates.rs`)
+- unused since the fork dropped the startup check (main.rs); delete with the updater if it never returns. (`apps/desktop-gpui/src/updates.rs`, `schedule_startup_check`)
 <!-- fork:end -->
 
 Cap is the open source alternative to Loom. It gives you fast screen recording, polished local editing, instant share links, comments, transcripts, analytics, team workspaces, custom domains, custom S3 storage, and full self-hosting when you need complete control.
