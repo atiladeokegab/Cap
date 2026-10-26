@@ -16,16 +16,15 @@ env:
   CAP_VERIFY_LOCKED: "1"
   CAP_VERIFY_REQUIRE_SUPPORTED: "1"
   CAP_VERIFY_HOST: blacksmith
-  CAP_VERIFY_LOG: cap_rendering=warn,cap_video_decode=warn
 
 jobs:
   test:
     runs-on: blacksmith-6vcpu-macos-15
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        rep: [1, 2, 3, 4]
+        rep: [1, 2]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,18 +43,12 @@ jobs:
       - name: Build
         shell: bash
         run: scripts/verify/run.sh fast --no-run
-      - name: Test under load
+      - name: Arms
         shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/lat"
-          bash scripts/verify/probe-sampler.sh "$RUNNER_TEMP/lat" &
-          CAP_VERIFY_PLAIN_SENTINEL="$RUNNER_TEMP/lat/plain.txt" CAP_VERIFY_LATENCY_FILE="$RUNNER_TEMP/lat/load.txt" CAP_VERIFY_LATENCY_MIN_MS=100 scripts/verify/run.sh fast || true
-          cp "$CAP_VERIFY_REPORT_DIR"/sentinel-*.log "$RUNNER_TEMP/lat/" 2>/dev/null || true
-          pkill -f probe-sampler.sh || true
-          pkill top || true
+        run: bash scripts/verify/probe-arms.sh "$RUNNER_TEMP/lat"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: lat-${{ matrix.rep }}
+          name: arms-${{ matrix.rep }}
           path: ${{ runner.temp }}/lat
           retention-days: 3
