@@ -2175,6 +2175,7 @@ dependencies = [
  "cap-rendering",
  "cap-timestamp",
  "cap-verify-expect",
+ "cap-video-decode",
  "cidre",
  "cpal 0.15.3 (git+https://github.com/CapSoftware/cpal?rev=6013cb5f8bd3)",
  "ffmpeg-next",
