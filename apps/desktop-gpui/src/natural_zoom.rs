@@ -2,8 +2,7 @@
 //!
 //! Clicks are work at the cursor's position, key presses at the last
 //! click's (where the field is). A zoom goes in only when work stays inside
-//! one region (under 40% of the frame's width and of its height) for at
-//! least 1.5 s, holds while it stays there, and goes out when the work moves
+//! one region (under 40% of the frame's area) for at least 1.5 s, holds while it stays there, and goes out when the work moves
 //! away or stops for 2 s. An isolated click, a click on window chrome and a
 //! drag make no zoom. Zoom-ins are at least 6 s apart and zoomed time stays
 //! under 35% of the recording; the longest stretches of work win the budget.
@@ -18,8 +17,9 @@ pub const BUDGET: f64 = 0.35;
 pub const EASE_MS: f64 = 750.;
 /// The zoom starts moving this long before the first piece of work.
 const LEAD_MS: f64 = 300.;
-/// The widest region, as a share of the frame's width and of its height.
-const MAX_SIDE: f64 = 0.4;
+/// The longest side of a region, as a share of the frame's: 1.4x shows 71%
+/// of each side, and 0.6 x 0.6 is 36% of the frame, under the 40% bound.
+const MAX_SIDE: f64 = 0.6;
 /// A press that travels this far before release is a drag, not work.
 const DRAG: f64 = 0.08;
 
@@ -51,9 +51,9 @@ pub struct Zoom {
 }
 
 /// Tighter on a smaller region: 2.0x on a point, falling to 1.4x as the
-/// region's longer side nears 40% of the frame.
+/// region's longer side reaches [`MAX_SIDE`].
 pub fn depth(side: f64) -> f64 {
-    (2.0 - 1.5 * side).clamp(1.4, 2.0)
+    (2.0 - side).clamp(1.4, 2.0)
 }
 
 /// `quiet` spans (shots marked `zoom: none`, and zero-width cuts between
@@ -133,7 +133,7 @@ pub fn natural_zoom(
                 .any(|&(a, _)| previous < a && a <= next.time_ms);
             let (nx0, ny0) = (x0.min(next.x), y0.min(next.y));
             let (nx1, ny1) = (x1.max(next.x), y1.max(next.y));
-            let fits = nx1 - nx0 < MAX_SIDE && ny1 - ny0 < MAX_SIDE;
+            let fits = (nx1 - nx0).max(ny1 - ny0) <= MAX_SIDE;
             if next.time_ms - previous >= STOP_MS || cut || !fits {
                 break;
             }
@@ -370,31 +370,26 @@ mod tests {
             .collect();
         let clicks = work(5_000., 8_600., 400.);
         assert!(natural_zoom(&moves, &clicks, &[], 30_000., &[]).is_empty());
-        // A thin strip still too wide (or tall), and one narrow enough.
-        let strip = |wide: f64, tall: bool| -> Vec<Move> {
+        // A box over 40% of the frame, one under it, and strips too long
+        // and short enough for the shallowest zoom.
+        let spread = |w: f64, h: f64| -> Vec<Move> {
             (0..10)
-                .map(|n| {
-                    let (along, across) =
-                        (0.2 + wide * (n % 2) as f64, 0.5 + 0.01 * (n % 3) as f64);
-                    let (x, y) = if tall {
-                        (across, along)
-                    } else {
-                        (along, across)
-                    };
-                    Move {
-                        time_ms: 5_000. + n as f64 * 400. - 10.,
-                        x,
-                        y,
-                    }
+                .map(|n| Move {
+                    time_ms: 5_000. + n as f64 * 400. - 10.,
+                    x: 0.2 + w * (n % 2) as f64,
+                    y: 0.2 + h * (n / 2 % 2) as f64,
                 })
                 .collect()
         };
-        for tall in [false, true] {
-            assert!(natural_zoom(&strip(0.41, tall), &clicks, &[], 30_000., &[]).is_empty());
-            assert_eq!(
-                natural_zoom(&strip(0.39, tall), &clicks, &[], 30_000., &[]).len(),
-                1
-            );
+        for (w, h, zooms) in [
+            (0.65, 0.65, 0),
+            (0.55, 0.55, 1),
+            (0.62, 0.05, 0),
+            (0.05, 0.62, 0),
+            (0.58, 0.05, 1),
+        ] {
+            let found = natural_zoom(&spread(w, h), &clicks, &[], 30_000., &[]).len();
+            assert_eq!(found, zooms, "{w} x {h}");
         }
     }
 
@@ -413,7 +408,7 @@ mod tests {
 
     #[test]
     fn depth_is_1_4_to_2_0_and_tighter_on_a_smaller_region() {
-        let sides = [0., 0.04, 0.1, 0.2, 0.3, 0.39, 0.399];
+        let sides = [0., 0.04, 0.1, 0.3, 0.5, 0.59, 0.6];
         for pair in sides.windows(2) {
             assert!(depth(pair[0]) > depth(pair[1]), "{pair:?}");
         }

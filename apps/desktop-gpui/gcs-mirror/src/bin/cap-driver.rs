@@ -215,14 +215,14 @@ fn prompter_op(request: &Value) -> Result<Value, String> {
     Ok(json!({ "mode": "shots", "marks": shots.marks(), "views": views }))
 }
 
-/// The editor's zoom pass over one recording, in seconds: `cursor`
-/// (cursor.json's `moves` and `clicks`), `keyboard.presses`, `duration_s`;
+/// The editor's zoom pass over one recording, in ms: cursor.json's `moves`
+/// and `clicks` as recorded, `keys` (key-down `{time_ms}`), `duration_ms`;
 /// a `shotlist` with its `marks` (shots.json) turns its `zoom: none` shots
 /// off. Ease is the editor's zoom spring's settle time.
 fn zoom_op(request: &Value) -> Result<Value, String> {
     let number = |value: &Value, field: &str| value[field].as_f64().unwrap_or(f64::NAN);
     let list = |value: &Value| value.as_array().cloned().unwrap_or_default();
-    let moves: Vec<natural_zoom::Move> = list(&request["cursor"]["moves"])
+    let moves: Vec<natural_zoom::Move> = list(&request["moves"])
         .iter()
         .map(|m| natural_zoom::Move {
             time_ms: number(m, "time_ms"),
@@ -230,17 +230,17 @@ fn zoom_op(request: &Value) -> Result<Value, String> {
             y: number(m, "y"),
         })
         .collect();
-    let clicks: Vec<natural_zoom::Click> = list(&request["cursor"]["clicks"])
+    let clicks: Vec<natural_zoom::Click> = list(&request["clicks"])
         .iter()
         .map(|c| natural_zoom::Click {
             time_ms: number(c, "time_ms"),
             down: c["down"].as_bool().unwrap_or(true),
         })
         .collect();
-    let keys: Vec<f64> = list(&request["keyboard"]["presses"])
+    let keys: Vec<f64> = list(&request["keys"])
         .iter()
         .filter(|k| k["down"].as_bool().unwrap_or(true))
-        .map(|k| number(k, "time_ms"))
+        .map(|k| k.as_f64().unwrap_or_else(|| number(k, "time_ms")))
         .collect();
     let mut quiet = Vec::new();
     if !request["shotlist"].is_null() {
@@ -251,15 +251,14 @@ fn zoom_op(request: &Value) -> Result<Value, String> {
             quiet.push((from as f64, to.map_or(f64::INFINITY, |to| to as f64)));
         }
     }
-    let duration_ms = number(request, "duration_s") * 1000.;
-    let ease = natural_zoom::EASE_MS / 1000.;
+    let duration_ms = number(request, "duration_ms");
     let segments: Vec<Value> =
         natural_zoom::natural_zoom(&moves, &clicks, &keys, duration_ms, &quiet)
             .into_iter()
             .map(|z| {
                 json!({
-                    "start": z.start_ms / 1000., "end": z.end_ms / 1000., "amount": z.amount,
-                    "ease_in_s": ease, "ease_out_s": ease,
+                    "start_ms": z.start_ms, "end_ms": z.end_ms, "amount": z.amount,
+                    "ease_ms": natural_zoom::EASE_MS, "x": z.x, "y": z.y,
                 })
             })
             .collect();
