@@ -52,7 +52,7 @@ jobs:
         run: |
           $data = Join-Path $env:RUNNER_TEMP "cap-data"
           New-Item -ItemType Directory -Force -Path $data, (Join-Path $env:RUNNER_TEMP "shots") | Out-Null
-          '{"general_settings":{"theme":"light","hasCompletedStartup":true,"hasCompletedOnboarding":true,"postStudioRecordingBehaviour":"openEditor"}}' |
+          '{"general_settings":{"theme":"light","hasCompletedStartup":true,"hasCompletedOnboarding":true,"postStudioRecordingBehaviour":"openEditor"},"recording_start_safety":{"confirmBeforeRecordingWithoutMicrophone":false}}' |
             Set-Content -Encoding utf8NoBOM (Join-Path $data "store")
           "CAP_GPUI_APP_DATA_DIR=$data" | Add-Content $env:GITHUB_ENV
           "CAP_GPUI_RECORDINGS_DIR=$(Join-Path $data 'recordings')" | Add-Content $env:GITHUB_ENV
@@ -80,13 +80,19 @@ jobs:
           Shot "start-screen"
           Stop-Cap
 
-          # 2. The bottom bar, mid-recording; 3. the editor it opens afterwards.
+          # 2. The bottom capture bar: the display overlay, left up.
+          $env:CAP_GPUI_AUTO_OVERLAY = "display"
+          Start-Process -FilePath $env:CAP_EXE
+          Start-Sleep 15
+          Shot "bottom-bar"
+          Stop-Cap
+          Remove-Item Env:CAP_GPUI_AUTO_OVERLAY
+
+          # 3. The editor's left rail, opened by a short studio recording.
           $env:CAP_GPUI_AUTO_RECORD = "studio:12"
           $env:CAP_GPUI_AUTO_NO_MIC = "1"
           Start-Process -FilePath $env:CAP_EXE
-          Start-Sleep 18
-          Shot "bottom-bar"
-          Start-Sleep 45
+          Start-Sleep 60
           Shot "editor-left-rail"
           Stop-Cap
 
