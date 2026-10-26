@@ -1,0 +1,55 @@
+name: Probe no-frame
+
+on:
+  push:
+    branches: [ci/probe-noframe]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  CAP_VERIFY_CARGO_PROFILE: ci-verify
+  CAP_VERIFY_NEXTEST_PROFILE: ci
+  CAP_VERIFY_LOCKED: "1"
+  CAP_VERIFY_REQUIRE_SUPPORTED: "1"
+  CAP_VERIFY_HOST: blacksmith
+  CAP_VERIFY_LOG: cap_rendering=warn,cap_video_decode=warn
+
+jobs:
+  test:
+    runs-on: blacksmith-6vcpu-macos-15
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup
+        uses: ./.github/actions/engine-verify-setup
+        with:
+          target: aarch64-apple-darwin
+          tier: fast
+          rust-cache: true
+      - name: Report location
+        shell: bash
+        run: |
+          echo "CAP_VERIFY_REPORT_DIR=$RUNNER_TEMP/verify-report" >> "$GITHUB_ENV"
+          echo "CAP_VERIFY_FLAKY_FILE=$RUNNER_TEMP/verify-report/flaky.txt" >> "$GITHUB_ENV"
+      - name: Build
+        shell: bash
+        run: scripts/verify/run.sh fast --no-run
+      - name: Test
+        shell: bash
+        run: scripts/verify/run.sh fast
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: report-${{ matrix.rep }}
+          path: ${{ runner.temp }}/verify-report
+          retention-days: 3

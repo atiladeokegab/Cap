@@ -1032,7 +1032,8 @@ impl Player {
             .map(|c| c.offsets)
             .unwrap_or_default();
         let needs_camera = !self.config.camera.hide;
-        if seek {
+        let started = std::time::Instant::now();
+        let frames = if seek {
             media
                 .decoders
                 .get_frames_initial(time as f32, needs_camera, true, offsets)
@@ -1042,8 +1043,13 @@ impl Player {
                 .decoders
                 .get_frames(time as f32, needs_camera, true, offsets)
                 .await
-        }
-        .ok_or_else(|| format!("decoders returned no frame for clip {clip} at {time:.3}s"))
+        };
+        frames.ok_or_else(|| {
+            format!(
+                "decoders returned no frame for clip {clip} at {time:.3}s after {} ms",
+                started.elapsed().as_millis()
+            )
+        })
     }
 }
 
