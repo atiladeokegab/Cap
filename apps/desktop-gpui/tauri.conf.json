@@ -18,7 +18,7 @@
 	},
 	"bundle": {
 		"active": true,
-		"createUpdaterArtifacts": false,
+		"createUpdaterArtifacts": true,
 		"targets": "all",
 		"category": "Video",
 		"longDescription": "Cap is the open source alternative to Loom. Lightweight, powerful, and cross-platform. Record and share in seconds.",
