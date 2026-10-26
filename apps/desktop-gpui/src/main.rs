@@ -42,6 +42,7 @@ mod editor_tabs;
 mod editor_timeline;
 mod editor_window;
 mod feeds;
+mod gcs_mirror;
 mod hotkeys;
 mod i18n;
 mod import;
@@ -333,6 +334,7 @@ fn main() {
     }
 
     single_instance::acquire();
+    gcs_mirror::resume_pending();
     let previous_session = crash_capture::begin_session(&diagnostics::logs_dir());
     blur_recovery::configure(previous_session);
     if cfg!(debug_assertions) {

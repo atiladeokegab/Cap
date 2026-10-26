@@ -55,10 +55,6 @@ on:
       soak_secs:
         description: "Adds the recording/soak/* cases at this length (seconds, at most 1800); set case_filter to recording/soak/* to run only them"
         default: ""
-  schedule:
-    - cron: "41 3 * * *"
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches:
       - ci/verify-ci

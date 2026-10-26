@@ -439,6 +439,8 @@ async fn finalize_studio(
     );
     let claim_progress = progress.clone();
     let completed = tokio::task::spawn_blocking(move || {
+        // Before the remux deletes the fragment folders the mirror reads.
+        crate::gcs_mirror::stop(&project_path);
         if needs_remux {
             ensure_finalization_storage(&project_path)?;
         }
@@ -2614,6 +2616,9 @@ async fn start_attempt_with_upload(
         .map(|upload| upload.video().id.clone());
     let instant_upload =
         instant_upload.map(|upload| Arc::new(tokio::sync::Mutex::new(Some(upload))));
+    if matches!(handle, Handle::Studio(_)) {
+        crate::gcs_mirror::start(&project_dir, config.start_gate.clone());
+    }
     Ok(ActiveRecording {
         handle,
         project_dir,

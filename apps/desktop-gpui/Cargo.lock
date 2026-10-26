@@ -1551,6 +1551,7 @@ dependencies = [
  "cap-editor",
  "cap-enc-ffmpeg",
  "cap-export",
+ "cap-gcs-mirror",
  "cap-gpui-kernels",
  "cap-i18n-build",
  "cap-media-info",
@@ -1769,6 +1770,21 @@ dependencies = [
  "tracing",
  "windows 0.60.0",
  "workspace-hack",
+]
+
+[[package]]
+name = "cap-gcs-mirror"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "hmac",
+ "percent-encoding",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tracing",
 ]
 
 [[package]]
