@@ -261,6 +261,8 @@ fn busy_alert(cx: &mut App) {
     .detach();
 }
 
+// shortcut: unused since the fork dropped the startup check (main.rs); delete with the updater if it never returns.
+#[allow(dead_code)]
 pub(crate) fn schedule_startup_check(cx: &mut App) {
     let (wake, requests) = flume::bounded(1);
     cx.set_global(UpdateScheduler {
