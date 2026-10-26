@@ -14,6 +14,9 @@ for line in sys.stdin:
     if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "playback":
         print(m["executable"])')
 echo "binary: $bin"
+# The test binary loads FFmpeg from @executable_path/../Frameworks.
+[[ -e target/ci-verify/Frameworks ]] || ln -s ../Frameworks target/ci-verify/Frameworks
+export DYLD_FALLBACK_LIBRARY_PATH="$PWD/target/Frameworks/Spacedrive.framework/Libraries:$PWD/target/native-deps/lib"
 [[ -x $bin ]] || exit 2
 case_glob='playback/vfr-holds/full/seq60-from30/*'
 one() { # <label> <iteration>
