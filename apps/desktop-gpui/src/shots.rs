@@ -77,7 +77,66 @@ pub struct ShotList {
     #[serde(default, rename = "title", deserialize_with = "present_string")]
     _title: Option<String>,
     pub shots: Vec<Shot>,
+    /// The film's what's-left checklist, checked apart from the shots so a
+    /// malformed one never blocks them.
+    #[serde(default, rename = "progress")]
+    raw_progress: Option<serde_json::Value>,
+    #[serde(skip)]
+    pub progress: Option<Progress>,
+    /// Why `progress` was ignored, one line.
+    #[serde(skip)]
+    pub warning: Option<String>,
 }
+
+/// What's left: shots with a good take (of the full list, not a pick-up
+/// list's), and each judging criterion covered or not.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Progress {
+    pub shots: Vec<ShotDone>,
+    pub criteria: Vec<Criterion>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct ShotDone {
+    pub shot_id: String,
+    pub title: String,
+    pub done: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Criterion {
+    pub id: String,
+    pub name: String,
+    pub covered: bool,
+    /// No evidence either way on the film side: never ticked.
+    #[serde(default)]
+    pub unverified: bool,
+}
+
+impl Progress {
+    /// `N of M shots done`.
+    pub fn summary(&self) -> String {
+        let done = self.shots.iter().filter(|shot| shot.done).count();
+        format!("{done} of {} shots done", self.shots.len())
+    }
+
+    /// One `(label, ticked)` row per shot, then per criterion.
+    pub fn rows(&self) -> Vec<(String, bool)> {
+        let shots = self.shots.iter().map(|s| (s.title.clone(), s.done));
+        let criteria = self.criteria.iter().map(|c| {
+            let label = match c.unverified {
+                true => format!("{} (unverified)", c.name),
+                false => c.name.clone(),
+            };
+            (label, c.covered && !c.unverified)
+        });
+        shots.chain(criteria).collect()
+    }
+}
+
+/// The largest list the teleprompter reads: it comes from the bucket,
+/// untrusted, and a real one is a few KiB.
+pub const MAX_LIST_BYTES: usize = 1 << 20;
 
 /// The contract lets an optional string be left out, never be `null`.
 fn present_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
@@ -87,7 +146,13 @@ fn present_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Strin
 /// Parses and validates a `shotlist.json`, the rules of
 /// `shotlist.schema.json` that serde's types do not already enforce.
 pub fn parse(bytes: &[u8]) -> Result<ShotList, String> {
-    let list: ShotList =
+    if bytes.len() > MAX_LIST_BYTES {
+        return Err(format!(
+            "shotlist.json is over {} KiB",
+            MAX_LIST_BYTES >> 10
+        ));
+    }
+    let mut list: ShotList =
         serde_json::from_slice(bytes).map_err(|error| format!("shotlist.json: {error}"))?;
     if list.shots.is_empty() {
         return Err("shotlist.json has no shots".into());
@@ -107,7 +172,36 @@ pub fn parse(bytes: &[u8]) -> Result<ShotList, String> {
             ));
         }
     }
+    if let Some(raw) = list.raw_progress.take() {
+        match serde_json::from_value(raw) {
+            Ok(progress) => list.progress = Some(progress),
+            Err(error) => list.warning = Some(format!("shotlist.json progress ignored: {error}")),
+        }
+    }
     Ok(list)
+}
+
+/// Shot-list reads in flight: each read takes a number when it starts, and
+/// a read that lands after a newer one has is dropped, so a slow old read
+/// never replaces a newer list.
+#[derive(Default)]
+pub struct Reads {
+    started: u64,
+    landed: u64,
+}
+
+impl Reads {
+    pub fn start(&mut self) -> u64 {
+        self.started += 1;
+        self.started
+    }
+
+    /// Whether read `number`'s result is still the newest to land.
+    pub fn land(&mut self, number: u64) -> bool {
+        let newest = number > self.landed;
+        self.landed = self.landed.max(number);
+        newest
+    }
 }
 
 /// `^[a-z][a-z0-9_-]*$`, the contracts' id pattern.
@@ -221,6 +315,8 @@ pub struct Shots {
     take: Option<PathBuf>,
     marks: Vec<ShotMark>,
     pub cue: Cue,
+    /// A list read mid-take, shown once the take ends.
+    pending: Option<ShotList>,
 }
 
 impl Shots {
@@ -232,6 +328,21 @@ impl Shots {
             take: None,
             marks: Vec::new(),
             cue: Cue::Reading,
+            pending: None,
+        }
+    }
+
+    /// A newly read list: shown from its first shot before the take's first
+    /// mark; once a shot is under way it waits for the take to end, so the
+    /// shot on screen never moves under the reader.
+    pub fn replace(&mut self, list: ShotList) {
+        if self.started {
+            self.pending = Some(list);
+        } else {
+            self.list = list;
+            self.current = 0;
+            self.cue = Cue::Reading;
+            self.pending = None;
         }
     }
 
@@ -324,6 +435,9 @@ impl Shots {
         match take {
             Some(take) => self.open(take),
             None => {
+                if let Some(list) = self.pending.take() {
+                    self.list = list;
+                }
                 self.current = 0;
                 self.started = false;
                 self.take = None;
@@ -589,5 +703,72 @@ mod tests {
             clock.read(Some(armed), armed + Duration::from_secs(9)),
             None
         );
+    }
+
+    #[test]
+    fn a_list_read_mid_take_waits_for_the_take_to_end_and_late_reads_drop() {
+        let take = std::env::temp_dir().join(format!("cap-shots-reload-{}", std::process::id()));
+        std::fs::create_dir_all(&take).unwrap();
+        let pickup =
+            || parse(br#"{"shots": [{"shot_id": "ask", "title": "Ask", "lines": []}]}"#).unwrap();
+        let mut shots = Shots::new(list());
+        shots.follow(Some(&take));
+        shots.mark(Action::Next, &take, (0, 100)).unwrap();
+        shots.mark(Action::Next, &take, (0, 200)).unwrap();
+        shots.replace(pickup());
+        assert_eq!(shots.current().shot_id, "demo");
+        shots.follow(None);
+        assert_eq!(shots.current().shot_id, "ask");
+        // Between takes a new list shows at once, from its first shot.
+        shots.replace(list());
+        assert_eq!(shots.current().shot_id, "intro");
+        std::fs::remove_dir_all(&take).unwrap();
+
+        let mut reads = Reads::default();
+        let (old, new) = (reads.start(), reads.start());
+        assert!(reads.land(new));
+        assert!(!reads.land(old));
+    }
+
+    #[test]
+    fn progress_is_read_apart_and_a_bad_one_is_only_a_warning() {
+        let with = |progress: &str| {
+            parse(
+                format!(
+                    r#"{{"shots": [{{"shot_id": "a", "title": "A", "lines": []}}], "progress": {progress}}}"#
+                )
+                .as_bytes(),
+            )
+            .unwrap()
+        };
+        let good = with(
+            r#"{"shots": [{"shot_id": "a", "title": "A", "done": true}, {"shot_id": "b", "title": "B", "done": false}],
+                "criteria": [{"id": "wow", "name": "Wow", "covered": true}, {"id": "p", "name": "Pitch", "covered": true, "unverified": true}]}"#,
+        );
+        let progress = good.progress.unwrap();
+        assert_eq!(progress.summary(), "1 of 2 shots done");
+        assert_eq!(
+            progress.rows(),
+            [
+                ("A".into(), true),
+                ("B".into(), false),
+                ("Wow".into(), true),
+                ("Pitch (unverified)".into(), false)
+            ]
+        );
+        assert!(good.warning.is_none());
+        for bad in [
+            r#""1 of 3""#,
+            r#"{"shots": [], "criteria": [{"id": "w", "name": "W"}]}"#,
+        ] {
+            let list = with(bad);
+            assert!(list.progress.is_none());
+            assert!(!list.warning.unwrap().contains('\n'));
+        }
+        let huge = format!(
+            r#"{{"title": "{}", "shots": [{{"shot_id": "a", "title": "A", "lines": []}}]}}"#,
+            "x".repeat(MAX_LIST_BYTES)
+        );
+        assert!(parse(huge.as_bytes()).is_err());
     }
 }
