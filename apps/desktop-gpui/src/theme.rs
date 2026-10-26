@@ -6,9 +6,9 @@
 //! `.dark`). The overridden ones are marked below -- they are *not* stock Radix,
 //! so regenerating this from a Radix crate would silently change the palette.
 //!
-//! This fork's palettes are the Canvid look instead, with its sizes in
-//! [`look`]: light is measured from Canvid's Windows screens (accent #4d66da),
-//! dark is a zinc-and-indigo counterpart (Canvid ships no dark screens).
+//! This fork's palettes follow the reference design instead, with its sizes in
+//! [`look`]: light is measured from the reference design's Windows screens (accent #4d66da),
+//! dark is a zinc-and-indigo counterpart (the reference design ships no dark screens).
 
 use std::sync::LazyLock;
 
@@ -21,17 +21,17 @@ use crate::i18n::Locale;
 use crate::platform::{self, ForcedAppearance, MaterialKind};
 use crate::store::AppTheme;
 
-/// The interface face. Canvid draws in a geometric grotesk and Inter is the
+/// The interface face. The reference design draws in a geometric grotesk and Inter is the
 /// measured stand-in, bundled and used on every platform rather than Segoe UI
-/// or SF Pro. Geist stays embedded as its fallback.
+/// or SF Pro. Geist stays embedded for the caption presets' generic stacks.
 pub const UI_FONT: &str = "Inter";
 
-/// The Canvid look's sizes: one type scale, spacing step and radius set shared
+/// The reference design's sizes: one type scale, spacing step and radius set shared
 /// by the start screen, the capture bar and the editor, so the three windows
 /// read as one product. Colours live on [`Theme`]; a pass from the reference
 /// screenshots should only need to edit values here and there.
 pub mod look {
-    /// The start screen's question: Canvid's 44px heading.
+    /// The start screen's question: the reference design's 44px heading.
     pub const HEADING_SIZE: f32 = 44.;
     pub const HEADING_LINE: f32 = 52.;
     /// Section headings and secondary captions.
@@ -56,13 +56,13 @@ pub mod look {
     /// Short cards and wide buttons: "Take a Screenshot", Camera Only.
     pub const RADIUS_TILE: f32 = 10.;
 
-    /// The start screen as measured from Canvid: three 286px square cards
+    /// The start screen as measured from the reference design: three 286px square cards
     /// 50 apart, a 22px label under each icon, then "or" and a 286x60
     /// "Take a Screenshot". The main window is sized to hold this column.
     pub const TARGET_CARD_SIZE: f32 = 286.;
     pub const TARGET_CARD_GAP: f32 = 50.;
     pub const START_WIDTH: f32 = TARGET_CARD_SIZE * 3. + TARGET_CARD_GAP * 2.;
-    /// Canvid draws a 120px colour illustration; Cap's glyphs are one colour,
+    /// The reference design draws a 120px colour illustration; Cap's glyphs are one colour,
     /// so they stay smaller to keep the same visual weight.
     pub const TARGET_ICON: f32 = 72.;
     pub const TARGET_LABEL_SIZE: f32 = 22.;
@@ -72,8 +72,9 @@ pub mod look {
     pub const SECONDARY_CARD_HEIGHT: f32 = 60.;
     pub const SECONDARY_ICON: f32 = 18.;
     pub const SECONDARY_LABEL_SIZE: f32 = 17.;
-    /// Gaps between the start screen's sections.
-    pub const SECTION_GAP: f32 = 32.;
+    /// Gaps between the start screen's sections, tight enough that the whole
+    /// screen, device rows included, fits the 800px window without scrolling.
+    pub const SECTION_GAP: f32 = 20.;
 
     /// The capture bar: a floating pill.
     pub const BAR_HEIGHT: f32 = 52.;
@@ -604,12 +605,12 @@ pub struct EditorPalette {
 impl EditorPalette {
     pub fn light() -> Self {
         Self {
-            // The Canvid look: floating #fbfafb panels on the #f3f3f3 window.
+            // The reference design: floating #fbfafb panels on the #f3f3f3 window.
             window: rgb(0xf3f3f3),
             card: rgb(0xfbfafb),
             card_2: rgb(0xf0f0f3),
             stage: rgb(0xededf0),
-            // Solid hairlines and fills, as Canvid draws them: panel border
+            // Solid hairlines and fills, as the reference design draws them: panel border
             // #d3d4db, segment track #ecebef, rail tile #e5e5ea.
             line: rgb(0xd3d4db),
             line_strong: rgb(0xc7c7ce),
@@ -643,7 +644,7 @@ impl EditorPalette {
 
     pub fn dark() -> Self {
         Self {
-            // The Canvid look: the same zinc surfaces and indigo accent as
+            // The reference design: the same zinc surfaces and indigo accent as
             // `Theme::dark`, so the editor and the start screen match.
             window: rgb(0x09090b),
             card: rgb(0x121215),
@@ -845,7 +846,7 @@ impl Theme {
             material: None,
             editor: EditorPalette::light(),
 
-            // The Canvid look, measured from Canvid's own Windows screens:
+            // The reference design, measured from its own Windows screens:
             // window #f3f3f3, card #f8f8f9, control #f0f0f3, hairline #cfcfd6.
             gray_1: rgb(0xf3f3f3),
             gray_2: rgb(0xf8f8f9),
@@ -860,7 +861,7 @@ impl Theme {
             gray_11: rgb(0x55575a),
             gray_12: rgb(0x1d2024),
 
-            // Canvid's accent #4d66da in place of Radix blue; the tints and
+            // The reference design's accent #4d66da in place of Radix blue; the tints and
             // shades around it are derived, not measured.
             blue_3: rgb(0xeef0fb),
             blue_4: rgb(0xe3e7f9),
@@ -904,7 +905,7 @@ impl Theme {
             material: None,
             editor: EditorPalette::dark(),
 
-            // The Canvid look's dark counterpart: zinc surfaces, indigo
+            // The reference design's dark counterpart: zinc surfaces, indigo
             // accent, crimson record. gray 5 and 9 sit between their
             // neighbours.
             gray_1: rgb(0x09090b),
@@ -1295,7 +1296,7 @@ impl Theme {
     }
 
     /// The target-select overlay's highlight wash (`bg-blue-600/40` upstream),
-    /// indigo-600 for the Canvid look. Not a Radix step: the overlay reaches
+    /// indigo-600 for the reference design. Not a Radix step: the overlay reaches
     /// straight for the Tailwind palette there.
     pub const TARGET_HIGHLIGHT: u32 = 0x4f46e5;
 

@@ -8,7 +8,7 @@
 //! They were checked against each other and kept apart deliberately -- merging
 //! them would mean inventing a shared component neither app has.
 //!
-//! The Canvid look stands the rail on its side: a vertical icon column down
+//! The reference design stands the rail on its side: a vertical icon column down
 //! the sidebar card's left edge, with 52x52 tiles.
 //!
 //! The indicator does not slide (no transform in this gpui rev); the selected
@@ -73,7 +73,7 @@ pub struct TabRail {
 }
 
 impl TabRail {
-    /// The editor's config sidebar rail, as Canvid draws it: a 60px column on
+    /// The editor's config sidebar rail, as the reference design draws it: a 60px column on
     /// the card surface, 52x52 tiles with radius 10 and 22px icons.
     pub fn editor(
         theme: &Theme,

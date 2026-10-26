@@ -175,7 +175,7 @@ const HEADER_HEIGHT: f32 = 52.;
 pub(crate) const SIDEBAR_WIDTH: f32 = 416.;
 /// The clips sidebar's back header.
 pub(crate) const SIDEBAR_TAB_BAR_HEIGHT: f32 = 46.;
-/// The Canvid look's vertical icon rail, inside the sidebar card left of the
+/// The reference design's vertical icon rail, inside the sidebar card left of the
 /// `SIDEBAR_WIDTH` content column.
 pub(crate) const SIDEBAR_RAIL_WIDTH: f32 = 60.;
 
@@ -11834,7 +11834,7 @@ impl Render for EditorWindow {
                                     .px(px(8.))
                                     .min_h(px(layout.player_min_height))
                                     // The settings rail, left of the player in
-                                    // the Canvid look. The 8px gutter is the
+                                    // the reference design. The 8px gutter is the
                                     // wrapper's, not the sidebar view's: a
                                     // margin inside a cached element is not
                                     // honoured.

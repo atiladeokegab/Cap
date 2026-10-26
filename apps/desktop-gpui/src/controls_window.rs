@@ -1,7 +1,7 @@
 //! The in-progress recording bar -- `in-progress-recording.tsx`, natively.
 //!
 //! A 320x150 transparent panel whose visible content is a floating pill hugging
-//! the bottom (the Canvid look, sized by `theme::look`): red stop disc with the
+//! the bottom (the reference design, sized by `theme::look`): red stop disc with the
 //! elapsed timer on the left, mic indicator and action buttons on the right, a
 //! drag handle on the trailing edge. The window itself is a non-activating
 //! panel at the maximum window level (see `app_windows`), so the buttons work

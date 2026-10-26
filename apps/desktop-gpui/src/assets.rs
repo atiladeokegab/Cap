@@ -28,14 +28,16 @@ macro_rules! assets {
 /// let this app render a weight the original cannot, which is how the two
 /// drift apart.
 const FONTS: &[(&str, &[u8])] = assets!("fonts":
-    // The Canvid look's face: rsms/inter 4.1, SIL OFL 1.1, licence in
-    // `assets/fonts/Inter-LICENSE.txt`. SemiBold is embedded because Canvid's
-    // labels and Export button draw at 600.
+    // The reference design's face: rsms/inter 4.1, SIL OFL 1.1, licence in
+    // `assets/fonts/Inter-LICENSE.txt`. SemiBold is embedded because the reference design's
+    // labels and Export button draw at 600, and Light because its start heading
+    // draws at 300.
+    "Inter-Light.ttf",
     "Inter-Regular.ttf",
     "Inter-Medium.ttf",
     "Inter-SemiBold.ttf",
     "Inter-Bold.ttf",
-    // Geist stays as Inter's fallback.
+    // Geist draws the caption presets' generic stacks (`editor_panels`).
     "Geist.ttf",
     "Geist-Medium.ttf",
     "Geist-Bold.ttf",

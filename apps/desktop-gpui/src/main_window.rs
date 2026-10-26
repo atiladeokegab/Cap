@@ -35,7 +35,7 @@ use gpui::{Entity, Task};
 
 /// `h-9` on `.cap-window-header`.
 const HEADER_HEIGHT: f32 = 36.;
-/// The window picker's grid: three columns across the Canvid-sized window.
+/// The window picker's grid: three columns across the reference-sized window.
 const PICKER_COLUMNS: f32 = 3.;
 
 /// `h-[42px]` in deviceRowStyles.ts.
@@ -239,7 +239,7 @@ fn shadow(color: Hsla, y: f32, blur: f32, spread: f32, inset: bool) -> gpui::Box
 /// unblurred, keep it cheap on a window that repaints with the mic meter.
 fn glass_button<E: Styled>(element: E, theme: Theme, selected: bool) -> E {
     let dark = theme.is_dark();
-    // The Canvid look: flat cards with a hairline, an accent ring when
+    // The reference design: flat cards with a hairline, an accent ring when
     // selected. The gradient and inner highlight stay for macOS glass only.
     if theme.material.is_none() {
         return element
@@ -296,7 +296,7 @@ fn capture_hover_fill(theme: Theme, selected: bool) -> Hsla {
     if selected {
         Theme::with_alpha(theme.blue_9, 0.06)
     } else if !theme.is_dark() && theme.material.is_none() {
-        // Canvid's light cards turn white under the pointer.
+        // The reference design's light cards turn white under the pointer.
         gpui::white()
     } else {
         glass_tint(theme, 0.04, 0.05)
@@ -6482,7 +6482,7 @@ impl MainWindow {
             )
     }
 
-    /// The Canvid start screen: Display, Window and Area as three large cards,
+    /// The reference start screen: Display, Window and Area as three large cards,
     /// then "Take a Screenshot" and Camera Only side by side underneath.
     fn render_targets(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
@@ -6493,16 +6493,15 @@ impl MainWindow {
             .items_center()
             .gap(px(look::SECTION_GAP))
             .w(px(look::START_WIDTH))
-            .pt(px(look::SECTION_GAP))
             .flex_shrink_0()
-            // Canvid's start screen leads with one large, light question.
+            // The reference design's start screen leads with one large, light question.
             .child(
                 div()
                     .w_full()
                     .text_center()
                     .text_size(px(look::HEADING_SIZE))
                     .line_height(px(look::HEADING_LINE))
-                    .font_weight(FontWeight::NORMAL)
+                    .font_weight(FontWeight::LIGHT)
                     .text_color(self.theme.gray_12)
                     .child(tr::main::target::heading()),
             )
@@ -6515,7 +6514,7 @@ impl MainWindow {
                     .child(self.render_split_target(TargetType::Window, cx))
                     .child(self.render_target_tile(TargetType::Area, cx)),
             )
-            // Canvid's "or" divider.
+            // The reference design's "or" divider.
             .child(
                 div()
                     .flex()
@@ -6724,7 +6723,7 @@ impl MainWindow {
             .overflow_hidden()
             .rounded(px(look::RADIUS_TILE))
             .map(|this| glass_button(this, theme, false))
-            // Canvid's button is a shade darker than the cards.
+            // The reference design's button is a shade darker than the cards.
             .when(theme.material.is_none(), |this| {
                 this.bg(theme.gray_3).border_color(theme.gray_7)
             })

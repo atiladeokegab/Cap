@@ -119,7 +119,7 @@ const TRACK_TILE_SIZE: f32 = 22.;
 const TRACK_TILE_INSET: f32 = 4.;
 /// The segment's radius, its left accent bar and the content inset that clears
 /// it (`0 10px 0 13px`).
-/// Canvid's clip radius.
+/// The reference design's clip radius.
 const SEGMENT_RADIUS: f32 = 4.;
 const SEGMENT_ACCENT_BAR: f32 = 3.;
 const SEGMENT_PADDING_LEFT: f32 = 13.;
@@ -178,7 +178,7 @@ pub const MINIMAP_MAX_WIDTH: f32 = 78.;
 /// with one definition each -- not per-appearance values -- so they are literal
 /// in both themes exactly as they are there
 /// (`apps/desktop/src/styles/theme.css`). The clip and zoom lanes are the
-/// exception: the Canvid look paints them from the theme's lane tokens.
+/// exception: the reference design paints them from the theme's lane tokens.
 pub mod track_color {
     pub const CAPTION: u32 = 0x0ea5e9;
     pub const KEYBOARD: u32 = 0xf97316;
@@ -218,6 +218,22 @@ fn seg_border(theme: &Theme, color: Hsla, extra_alpha: f32) -> Hsla {
 
 fn seg_label(theme: &Theme, color: Hsla) -> Hsla {
     theme.editor.seg_label(gpui::Rgba::from(color)).into()
+}
+
+/// The reference design sets a gradient lane's name and duration in a dark ink of the
+/// lane's own hue. The gradient is the same bright fill in both themes, so the
+/// ink is pulled toward black in both, and the duration (`text_3`) shares it:
+/// a grey reads under 2:1 on the fill.
+fn gradient_label_ink(theme: &Theme, from: gpui::Rgba) -> (Theme, Hsla) {
+    let mut label_theme = *theme;
+    label_theme.editor.seg_label_base = gpui::rgb(0x000000);
+    label_theme.editor.seg_label_mix = 0.58;
+    label_theme.editor.text_3 = gpui::rgb(0x000000);
+    let ink = Hsla {
+        l: 0.14,
+        ..Hsla::from(from)
+    };
+    (label_theme, ink)
 }
 
 fn seg_muted(theme: &Theme, color: Hsla) -> Hsla {
@@ -2681,7 +2697,7 @@ fn render_segment(
     camera3d_editing_end: bool,
 ) -> AnyElement {
     let muted = matches!(segment.detail, SegmentDetail::Clip { muted: true, .. });
-    // Canvid paints the clip and zoom lanes as solid top-to-bottom gradients;
+    // The reference design paints the clip and zoom lanes as solid top-to-bottom gradients;
     // their waveform, label and handles key off the lighter stop.
     let gradient = match kind {
         TrackKind::Clip if !muted => Some((theme.editor.clip_from, theme.editor.clip_to)),
@@ -2775,17 +2791,12 @@ fn render_segment(
         }
     }
 
-    // Canvid sets its lane labels in a dark ink of the lane's own hue; the
-    // lighter stop would read mid-green on the gradient.
-    let label_color = match gradient {
-        Some((from, _)) => Hsla {
-            l: 0.18,
-            ..Hsla::from(from)
-        },
-        None => color,
+    let (label_theme, label_color) = match gradient {
+        Some((from, _)) => gradient_label_ink(theme, from),
+        None => (*theme, color),
     };
     fill = fill.child(render_label(
-        theme,
+        &label_theme,
         label_color,
         segment,
         visible_width,
@@ -3754,7 +3765,7 @@ pub fn ghost_offset(view: TimelineView, content_width: f32) -> Option<f32> {
         .map(|time| ((time - view.transform.position) / secs_per_pixel) as f32)
 }
 
-/// The playhead, as Canvid draws it: a 2px column from the ruler's baseline
+/// The playhead, as the reference design draws it: a 2px column from the ruler's baseline
 /// to the bottom of the card, under a 10x14 rounded tab.
 pub fn render_playhead(theme: &Theme, x: f32, opacity: f32) -> AnyElement {
     let color = Hsla::from(theme.editor.playhead);
@@ -3830,6 +3841,35 @@ pub fn wheel_zoom_delta(dom_delta_y: f64, zoom: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn relative_luminance(color: gpui::Rgba) -> f32 {
+        let linear = |c: f32| {
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+    }
+
+    #[test]
+    fn gradient_lane_labels_clear_four_and_a_half_to_one_mid_lane() {
+        for theme in [Theme::light(), Theme::dark()] {
+            for (from, to) in [
+                (theme.editor.clip_from, theme.editor.clip_to),
+                (theme.editor.zoom_from, theme.editor.zoom_to),
+            ] {
+                let mid = crate::theme::mix(from, to, 0.5);
+                let (label_theme, ink) = gradient_label_ink(&theme, from);
+                for text in [seg_label(&label_theme, ink), seg_muted(&label_theme, ink)] {
+                    let ratio = (relative_luminance(mid) + 0.05)
+                        / (relative_luminance(gpui::Rgba::from(text)) + 0.05);
+                    assert!(ratio >= 4.5, "{ratio} on {mid:?}");
+                }
+            }
+        }
+    }
 
     const AUDIO_SAMPLE_RATE: usize = 48_000;
 

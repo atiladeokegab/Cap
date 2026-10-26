@@ -2614,7 +2614,7 @@ impl EditorWindow {
                 this.select_sidebar_tab(*index, window, cx);
             }));
 
-        // The Canvid look: the icon rail down the card's left edge, the tab
+        // The reference design: the icon rail down the card's left edge, the tab
         // body beside it.
         let body = div()
             .flex()
