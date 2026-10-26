@@ -789,6 +789,7 @@ pub struct Player {
     config: std::sync::Arc<ProjectConfiguration>,
     duration: f64,
     resolution: XY<u32>,
+    label: String,
 }
 
 impl Player {
@@ -842,6 +843,7 @@ impl Player {
         let constants_ref: &'static cap_rendering::RenderVideoConstants =
             unsafe { &*std::sync::Arc::as_ptr(&constants) };
         Ok(Self {
+            label: format!("{} {}", project.name, decoder.label()),
             renderer: Some(cap_rendering::FrameRenderer::new(constants_ref)),
             constants,
             segments,
@@ -1044,6 +1046,24 @@ impl Player {
                 .get_frames(time as f32, needs_camera, true, offsets)
                 .await
         };
+        if let Ok(path) = std::env::var("CAP_VERIFY_LATENCY_FILE") {
+            use std::io::Write;
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            let min: f64 = std::env::var("CAP_VERIFY_LATENCY_MIN_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.0);
+            if ms >= min
+                && let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+            {
+                let _ = writeln!(
+                    file,
+                    "{} clip{clip} t={time:.3} seek={seek} ms={ms:.1} ok={}",
+                    self.label,
+                    frames.is_some()
+                );
+            }
+        }
         frames.ok_or_else(|| {
             format!(
                 "decoders returned no frame for clip {clip} at {time:.3}s after {} ms",
