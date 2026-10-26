@@ -1,0 +1,44 @@
+{
+  "source": "lead's Canvid screenshots 2026-10-26, measured.md",
+  "note": "Canvid's light app, sampled from PNGs with no ICC profile (treated as sRGB, about +/-2); radii about +/-2-4px",
+  "colors": {
+    "window": "#F3F3F3",
+    "panel": "#FBFAFB",
+    "modal_and_active_segment": "#FCFCFD",
+    "card": "#F8F8F9",
+    "ink": "#1D2024",
+    "label": "#55575A",
+    "muted": "#6B6E72",
+    "helper": "#909294",
+    "time": "#8A8C90",
+    "icon": "#515357",
+    "borders": ["#CFCFD6", "#D6D5DD", "#D3D4DB", "#C7C7CE", "#C6C6C9"],
+    "control_fill": "#F0F0F3",
+    "rail_active_grouped_fill": "#EDEDF0",
+    "segment_track": "#ECEBEF",
+    "modal_selected": "#E5E5EA",
+    "accent": "#4D66DA",
+    "playhead": "#4092FD",
+    "selected_tile_pill_fill": "#1D2024",
+    "clip_lane": ["#42865D", "#6DB488"],
+    "zoom_lane": ["#526ADA", "#6E80DA"]
+  },
+  "radii": {
+    "card_modal": 16,
+    "panel": 14,
+    "segment_track": 12,
+    "segment_pill_tile_rail_tile": 10,
+    "button": 8,
+    "hex_field": 8,
+    "reset": 6,
+    "clip": 4,
+    "option_pill": "full"
+  },
+  "typography": {
+    "face": "a geometric grotesk",
+    "stand_in": "Inter",
+    "tabular_numbers_for_times": true,
+    "scale_px": [14, 15, "17-18", 20, 44],
+    "weights": {"body": 400, "labels_buttons": "500-600", "large_heading": "300-400"}
+  }
+}
