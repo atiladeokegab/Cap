@@ -142,43 +142,20 @@ impl Mirror {
         body: Vec<u8>,
         timeout: Duration,
     ) -> Result<Vec<u8>, String> {
-        let url = self.url(key)?;
-        let host = match url.port() {
-            Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
-            None => url.host_str().unwrap_or_default().to_string(),
-        };
-        let sha = sigv4::sha256_hex(&body);
-        let mut headers = BTreeMap::from([
-            ("host".to_string(), host),
-            ("x-amz-content-sha256".to_string(), sha.clone()),
-            (
-                "x-amz-date".to_string(),
-                chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
-            ),
-        ]);
-        let key_ = sigv4::Key {
+        let signer = sigv4::Key {
             access_key: &self.config.access_key,
             secret_key: &self.config.secret_key,
             region: &self.config.region,
             service: "s3",
         };
-        let (authorization, _) = sigv4::authorize(&key_, method, &url, &headers, &sha)?;
-        headers.insert("authorization".into(), authorization);
-        let mut request = self
-            .client
-            .request(method.parse().map_err(|_| "bad method")?, url)
-            .timeout(timeout)
-            .body(body);
-        for (name, value) in &headers {
-            request = request.header(name, value);
-        }
-        let response = request.send().map_err(|e| e.to_string())?;
-        let status = response.status();
-        let bytes = response.bytes().map_err(|e| e.to_string())?;
-        if !status.is_success() {
-            return Err(format!("{method} {key}: {status}"));
-        }
-        Ok(bytes.to_vec())
+        request(
+            &self.client,
+            &signer,
+            method,
+            &self.url(key)?,
+            body,
+            timeout,
+        )
     }
 
     pub fn get(&self, key: &str) -> Result<Vec<u8>, String> {
@@ -407,6 +384,46 @@ impl Mirror {
             backoff = (backoff * 2).min(Duration::from_secs(30));
         }
     }
+}
+
+/// One SigV4-signed XML-API request to any object URL; the body on success.
+pub fn request(
+    client: &Client,
+    signer: &sigv4::Key,
+    method: &str,
+    url: &Url,
+    body: Vec<u8>,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    let host = match url.port() {
+        Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
+        None => url.host_str().unwrap_or_default().to_string(),
+    };
+    let sha = sigv4::sha256_hex(&body);
+    let mut headers = BTreeMap::from([
+        ("host".to_string(), host),
+        ("x-amz-content-sha256".to_string(), sha.clone()),
+        (
+            "x-amz-date".to_string(),
+            chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
+        ),
+    ]);
+    let (authorization, _) = sigv4::authorize(signer, method, url, &headers, &sha)?;
+    headers.insert("authorization".into(), authorization);
+    let mut request = client
+        .request(method.parse().map_err(|_| "bad method")?, url.clone())
+        .timeout(timeout)
+        .body(body);
+    for (name, value) in &headers {
+        request = request.header(name, value);
+    }
+    let response = request.send().map_err(|e| e.to_string())?;
+    let status = response.status();
+    let bytes = response.bytes().map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("{method} {}: {status}", url.path()));
+    }
+    Ok(bytes.to_vec())
 }
 
 fn remaining(deadline: Instant) -> Duration {
