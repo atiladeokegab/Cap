@@ -1382,7 +1382,7 @@ impl GeneralSettings {
                 .unwrap_or_else(default_excluded_windows),
             update_channel: enum_at(general, "updateChannel"),
             server_url: string_at(general, "serverUrl", DEFAULT_SERVER_URL),
-            enable_telemetry: bool_at(general, "enableTelemetry", true),
+            enable_telemetry: bool_at(general, "enableTelemetry", false),
             editor_preview_quality: enum_at(general, "editorPreviewQuality"),
             enable_native_camera_preview: bool_at(general, "enableNativeCameraPreview", false),
             out_of_process_muxer: bool_at(general, "outOfProcessMuxer", false),
