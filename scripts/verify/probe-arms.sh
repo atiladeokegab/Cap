@@ -21,7 +21,7 @@ export DYLD_FALLBACK_LIBRARY_PATH="$PWD/target/Frameworks/Spacedrive.framework/L
 case_glob='playback/vfr-holds/full/seq60-from30/*'
 one() { # <label> <iteration>
   CAP_VERIFY_CASE=$case_glob CAP_VERIFY_LATENCY_FILE="$out/$1.txt" CAP_VERIFY_LATENCY_MIN_MS=100 \
-    "$bin" play_from_middle --exact --test-threads=1 >"$out/$1-$2.log" 2>&1
+    "$bin" play_from_middle --exact --test-threads=1 --nocapture >"$out/$1-$2.log" 2>&1
   echo "$1 $2 exit=$?" >>"$out/exits.txt"
 }
 export CAP_PROBE_AVF_TIMING=1
