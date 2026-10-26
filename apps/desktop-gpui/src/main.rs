@@ -97,6 +97,7 @@ mod tray;
 mod ui;
 mod updates;
 mod upload;
+mod window_log;
 
 use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 

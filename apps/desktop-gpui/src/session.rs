@@ -1454,6 +1454,7 @@ impl RecordingSession {
                 if let Some(paused) = outcome.paused {
                     let was_paused = this.is_paused();
                     this.phase = Phase::Recording { paused };
+                    crate::window_log::set_paused(paused);
                     if was_paused && !paused {
                         if let Some(since) = this.paused_since.take() {
                             this.paused_accum += since.elapsed();
@@ -1629,6 +1630,7 @@ impl RecordingSession {
                 if let Some(paused) = outcome.paused {
                     let was_paused = this.is_paused();
                     this.phase = Phase::Recording { paused };
+                    crate::window_log::set_paused(paused);
                     if was_paused && !paused {
                         if let Some(since) = this.paused_since.take() {
                             this.paused_accum += since.elapsed();

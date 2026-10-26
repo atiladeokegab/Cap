@@ -1097,6 +1097,7 @@ impl ActiveRecording {
 
     #[cfg(target_os = "linux")]
     pub(crate) async fn cancel_preserving(self) -> anyhow::Result<()> {
+        crate::window_log::stop();
         if let Some(gate) = &self.start_gate {
             gate.arm();
         }
@@ -1158,6 +1159,7 @@ impl ActiveRecording {
         query: Option<String>,
         keep_media: bool,
     ) -> anyhow::Result<()> {
+        crate::window_log::stop();
         if let Some(gate) = &self.start_gate {
             gate.arm();
         }
@@ -1265,6 +1267,7 @@ impl ActiveRecording {
         let mut instant_upload = upload_guard.as_deref_mut().and_then(Option::as_mut);
         match self.handle {
             Handle::Studio(handle) => {
+                crate::window_log::stop();
                 let capture_target = handle.capture_target.clone();
                 let completed = handle.stop().await?;
                 finalize_studio(completed, capture_target, None, camera_snapshot).await
@@ -2602,6 +2605,12 @@ async fn start_attempt_with_upload(
         }
     };
 
+    if matches!(handle, Handle::Studio(_)) {
+        let gate = config.start_gate.clone();
+        crate::window_log::start(&project_dir, move || {
+            gate.as_ref()?.armed_at().map(|armed| armed.instant())
+        });
+    }
     #[cfg(target_os = "linux")]
     let instant_completion = instant_upload
         .as_ref()
