@@ -17,10 +17,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def run(command, *, timeout=180, env=None, input=None):
+def run(command, *, timeout=180, env=None, input=None, cwd=ROOT):
     result = subprocess.run(
         command,
-        cwd=ROOT,
+        cwd=cwd,
         env={**os.environ, **(env or {})},
         input=input,
         capture_output=True,
