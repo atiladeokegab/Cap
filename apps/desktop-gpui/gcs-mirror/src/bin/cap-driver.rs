@@ -1,10 +1,16 @@
 //! Test-only adapter for tests/acceptance: one JSON request on stdin
-//! (`op`: sign, scan, stop, resume or shots), one JSON object on stdout.
+//! (`op`: sign, scan, stop, resume, shots, prompter or zoom), one JSON object
+//! on stdout.
 
 // The teleprompter's shot logic, std and serde only, straight from the app.
 #[allow(dead_code)]
 #[path = "../../../src/shots.rs"]
 mod shots;
+
+// The editor's zoom pass, std only, straight from the app.
+#[allow(dead_code)]
+#[path = "../../../src/natural_zoom.rs"]
+mod natural_zoom;
 
 use cap_gcs_mirror::{Config, Mirror, sigv4};
 use serde_json::{Value, json};
@@ -112,6 +118,153 @@ fn shots_op(request: &Value) -> Result<Value, String> {
     }))
 }
 
+/// The teleprompter's script size by default (`store.rs`).
+const SCRIPT_TEXT_PX: f32 = 30.;
+
+/// The teleprompter between shots, on the same injected clock as `shots`:
+/// `next` and `retake` are the shot keys (Next on a started take holds on the
+/// next shot's card and pauses the recording; pressed again on its card it is
+/// Go), `go` starts the card's 3-2-1, `scroll` reads up to `line` (past the
+/// last: the STOP cue), `tick` only lets time pass. When the 3-2-1 is over the
+/// recording resumes as a new segment with that step as its epoch, and the
+/// held press marks there. One view per step.
+fn prompter_op(request: &Value) -> Result<Value, String> {
+    let script = request["script"].as_array().cloned().unwrap_or_default();
+    let mut shots = match &request["shotlist"] {
+        Value::Null => {
+            let view = json!({
+                "shot_id": null, "line": null, "cue": null,
+                "recording": true, "card": null, "countdown": null,
+            });
+            return Ok(json!({ "mode": "free", "marks": [], "views": vec![view; script.len()] }));
+        }
+        list => shots::Shots::new(shots::parse(list.to_string().as_bytes())?),
+    };
+    let base = Instant::now();
+    let at = |ms: f64| base + Duration::from_secs_f64(ms.max(0.) / 1000.);
+    let armed = at(request["epoch_ms"].as_f64().unwrap_or(0.));
+    let take = request["take"].as_str().map(PathBuf::from);
+    let mut clock = shots::ShotClock::default();
+    let (mut line, mut recording, mut go_at) = (0, true, None::<f64>);
+    let mut views = Vec::new();
+    for step in &script {
+        let ms = step["at_ms"].as_f64().unwrap_or(0.);
+        let mut press = None;
+        match step["action"].as_str() {
+            Some(key @ ("next" | "retake")) => {
+                let action = match key {
+                    "next" => shots::Action::Next,
+                    _ => shots::Action::Retake,
+                };
+                if shots.cue == shots::Cue::Ready(action) {
+                    shots.go();
+                    go_at = Some(ms);
+                } else if shots.hold(action) {
+                    clock.pause();
+                    recording = false;
+                } else {
+                    press = Some(action);
+                }
+            }
+            Some("go") => {
+                if shots.go().is_some() {
+                    go_at = Some(ms);
+                }
+            }
+            Some("scroll") => {
+                line = step["line"].as_u64().unwrap_or(0) as usize;
+                if line >= shots.current().lines.len() {
+                    shots.ended();
+                }
+            }
+            Some("tick") => {}
+            other => return Err(format!("unknown action {other:?}")),
+        }
+        let count = go_at.and_then(|go| shots::countdown((ms - go) as u64));
+        if go_at.is_some() && count.is_none() {
+            go_at = None;
+            clock.resume(Some(at(ms)));
+            recording = true;
+            if let shots::Cue::Countdown(action) = shots.cue {
+                press = Some(action);
+            }
+        }
+        if let (Some(action), Some(take), Some(time)) =
+            (press, &take, clock.read(Some(armed), at(ms)))
+        {
+            shots.mark(action, take, time).map_err(|e| e.to_string())?;
+            line = 0;
+        }
+        let card = shots.upcoming().map(|shot| {
+            json!({
+                "title": shot.title,
+                "on_screen": shot.on_screen,
+                "text_px": SCRIPT_TEXT_PX * shots::CARD_SCALE,
+                "go": count.is_none(),
+            })
+        });
+        views.push(json!({
+            "shot_id": shots.current().shot_id,
+            "line": line,
+            "cue": (shots.cue == shots::Cue::Stop).then_some("stop"),
+            "recording": recording,
+            "card": card,
+            "countdown": count,
+        }));
+    }
+    Ok(json!({ "mode": "shots", "marks": shots.marks(), "views": views }))
+}
+
+/// The editor's zoom pass over one recording, in ms: cursor.json's `moves`
+/// and `clicks` as recorded, `keys` (key-down `{time_ms}`), `duration_ms`;
+/// a `shotlist` with its `marks` (shots.json) turns its `zoom: none` shots
+/// off. Ease is the editor's zoom spring's settle time.
+fn zoom_op(request: &Value) -> Result<Value, String> {
+    let number = |value: &Value, field: &str| value[field].as_f64().unwrap_or(f64::NAN);
+    let list = |value: &Value| value.as_array().cloned().unwrap_or_default();
+    let moves: Vec<natural_zoom::Move> = list(&request["moves"])
+        .iter()
+        .map(|m| natural_zoom::Move {
+            time_ms: number(m, "time_ms"),
+            x: number(m, "x"),
+            y: number(m, "y"),
+        })
+        .collect();
+    let clicks: Vec<natural_zoom::Click> = list(&request["clicks"])
+        .iter()
+        .map(|c| natural_zoom::Click {
+            time_ms: number(c, "time_ms"),
+            down: c["down"].as_bool().unwrap_or(true),
+        })
+        .collect();
+    let keys: Vec<f64> = list(&request["keys"])
+        .iter()
+        .filter(|k| k["down"].as_bool().unwrap_or(true))
+        .map(|k| k.as_f64().unwrap_or_else(|| number(k, "time_ms")))
+        .collect();
+    let mut quiet = Vec::new();
+    if !request["shotlist"].is_null() {
+        let shot_list = shots::parse(request["shotlist"].to_string().as_bytes())?;
+        let marks: Vec<shots::ShotMark> =
+            serde_json::from_value(request["marks"].clone()).map_err(|e| e.to_string())?;
+        for (_, from, to) in shots::zoomless(&shot_list, &marks) {
+            quiet.push((from as f64, to.map_or(f64::INFINITY, |to| to as f64)));
+        }
+    }
+    let duration_ms = number(request, "duration_ms");
+    let segments: Vec<Value> =
+        natural_zoom::natural_zoom(&moves, &clicks, &keys, duration_ms, &quiet)
+            .into_iter()
+            .map(|z| {
+                json!({
+                    "start_ms": z.start_ms, "end_ms": z.end_ms, "amount": z.amount,
+                    "ease_ms": natural_zoom::EASE_MS, "x": z.x, "y": z.y,
+                })
+            })
+            .collect();
+    Ok(json!({ "segments": segments }))
+}
+
 fn fetch_shotlist(request: &Value, url: &str) -> Result<Vec<u8>, String> {
     let url = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
     let signer = sigv4::Key {
@@ -137,6 +290,12 @@ fn run(request: &Value) -> Result<Value, String> {
     }
     if request["op"] == "shots" {
         return shots_op(request);
+    }
+    if request["op"] == "prompter" {
+        return prompter_op(request);
+    }
+    if request["op"] == "zoom" {
+        return zoom_op(request);
     }
     let Some(mut mirror) = mirror(request)? else {
         return Ok(json!({ "enabled": false }));

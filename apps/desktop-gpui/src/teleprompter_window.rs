@@ -33,7 +33,7 @@ use crate::theme::LocaleFont as _;
 use crate::{
     platform,
     session::{Phase, RecordingSession},
-    shots::{self, Shots},
+    shots::{self, Cue, Shots},
     store::{self, TeleprompterState},
     theme::Theme,
     ui,
@@ -238,6 +238,10 @@ pub struct TeleprompterWindow {
     shots: Option<Shots>,
     /// Why the shot list did not load, or the last `shots.json` write failed.
     shots_error: Option<String>,
+    /// When Go was pressed, while its 3-2-1 runs (display only: the mark
+    /// waits for the recording's own resume).
+    countdown: Option<Instant>,
+    countdown_task: Option<gpui::Task<()>>,
 }
 
 impl TeleprompterWindow {
@@ -293,6 +297,9 @@ impl TeleprompterWindow {
             if let Some(shots) = this.shots.as_mut() {
                 shots.follow(session.shot_take().as_deref());
             }
+            // Go's countdown is over and the recording is back: the held
+            // shot starts at the resumed segment's epoch.
+            let resumed = session.shot_time().is_some();
             let was_running = this.playback_state.running();
             this.playback_state
                 .update_recording(session.phase, session.pause_uncertain());
@@ -300,6 +307,12 @@ impl TeleprompterWindow {
                 this.playback = None;
             } else if !was_running {
                 this.start_playback(window, cx);
+            }
+            if let Some(Cue::Countdown(action)) = this.shots.as_ref().map(|shots| shots.cue)
+                && this.countdown.is_none()
+                && resumed
+            {
+                this.write_mark(action, window, cx);
             }
             cx.notify();
             window.refresh();
@@ -353,6 +366,8 @@ impl TeleprompterWindow {
             playback: None,
             shots: None,
             shots_error: None,
+            countdown: None,
+            countdown_task: None,
         }
     }
 
@@ -366,9 +381,34 @@ impl TeleprompterWindow {
         window.focus(&focus, cx);
     }
 
-    /// Next shot / Retake: a mark in the live take's `shots.json`. Nothing
-    /// while no studio recording is running or it is paused.
-    pub fn mark_shot(&mut self, action: shots::Action, cx: &mut Context<Self>) {
+    /// Next shot / Retake. On a started take Next stops between shots: the
+    /// recording pauses on the next shot's card until Go (or Next again).
+    /// The take's first shot, and Retake while recording, mark at once.
+    pub fn mark_shot(
+        &mut self,
+        action: shots::Action,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(shots) = self.shots.as_mut() else {
+            return;
+        };
+        if shots.cue == Cue::Ready(action) {
+            self.go(window, cx);
+            return;
+        }
+        if shots.hold(action) {
+            set_recording_paused(true, cx);
+            cx.notify();
+            return;
+        }
+        self.write_mark(action, window, cx);
+    }
+
+    /// A mark in the live take's `shots.json`, and the shot's lines from the
+    /// top, scrolling with the recording. Nothing while no studio recording
+    /// is running or it is paused.
+    fn write_mark(&mut self, action: shots::Action, window: &mut Window, cx: &mut Context<Self>) {
         let Some(shots) = self.shots.as_mut() else {
             return;
         };
@@ -379,6 +419,46 @@ impl TeleprompterWindow {
             tracing::error!(%error, "could not write shots.json");
             format!("Could not write shots.json: {error}")
         });
+        self.position = 0.;
+        self.apply_scroll();
+        self.playback_state.requested = true;
+        self.start_playback(window, cx);
+        cx.notify();
+    }
+
+    /// Go on the card: a visible 3-2-1, then the recording resumes. Pressed
+    /// again after a resume that did not take, it asks again.
+    fn go(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(shots) = self.shots.as_mut() else {
+            return;
+        };
+        if shots.go().is_none() {
+            if matches!(shots.cue, Cue::Countdown(_)) && self.countdown.is_none() {
+                set_recording_paused(false, cx);
+            }
+            return;
+        }
+        let started = Instant::now();
+        self.countdown = Some(started);
+        self.countdown_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let total = Duration::from_millis(shots::COUNTDOWN_MS);
+            while started.elapsed() < total {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                this.update_in(cx, |_, window, cx| {
+                    cx.notify();
+                    window.refresh();
+                })
+                .ok();
+            }
+            this.update(cx, |this, cx| {
+                this.countdown = None;
+                set_recording_paused(false, cx);
+                cx.notify();
+            })
+            .ok();
+        }));
         cx.notify();
     }
 
@@ -537,19 +617,31 @@ impl TeleprompterWindow {
         let maximum = self.maximum_scroll();
         if maximum <= 1. {
             self.playback_state.requested = false;
+            if let Some(shots) = self.shots.as_mut() {
+                shots.ended();
+            }
             return false;
         }
 
-        let speed = calculate_playback_speed(
-            maximum,
-            count_words(&self.state.script),
-            self.state.words_per_minute,
-        );
+        let words = match &self.shots {
+            Some(shots) => shots
+                .current()
+                .lines
+                .iter()
+                .map(|line| count_words(&line.text))
+                .sum(),
+            None => count_words(&self.state.script),
+        };
+        let speed = calculate_playback_speed(maximum, words, self.state.words_per_minute);
         self.position = advance_playback_position(self.position, maximum, speed, elapsed);
         self.apply_scroll();
 
         if self.position >= maximum - 0.5 {
             self.playback_state.requested = false;
+            // Past the shot's last line: the STOP cue.
+            if let Some(shots) = self.shots.as_mut() {
+                shots.ended();
+            }
             return false;
         }
         true
@@ -625,7 +717,7 @@ impl TeleprompterWindow {
 
 /// [`shots::BUCKET_KEY`] through the mirror's `mirror.json` and signer, else
 /// the app-data [`shots::LOCAL_FILE`]. Blocking.
-fn load_shot_list() -> (Option<shots::ShotList>, Option<String>) {
+pub(crate) fn load_shot_list() -> (Option<shots::ShotList>, Option<String>) {
     let bucket = cap_gcs_mirror::Config::load(&store::app_data_dir().join("mirror.json"))
         .ok_or_else(|| "no mirror.json".to_string())
         .and_then(|config| {
@@ -701,7 +793,10 @@ impl Render for TeleprompterWindow {
             .text_color(Hsla::from(theme.gray_12))
             .child(self.render_header(window))
             .map(|this| match &self.shots {
-                Some(shots) => this.child(self.render_shot(shots)),
+                Some(shots) => match shots.upcoming() {
+                    Some(card) => this.child(self.render_card(shots, card, cx)),
+                    None => this.child(self.render_shot(shots, window)),
+                },
                 None => this.child(self.render_body(window, cx)),
             })
             .child(self.render_footer(cx))
@@ -717,7 +812,7 @@ impl TeleprompterWindow {
     /// see `script_input`. This handler only runs when the field does *not*
     /// have focus, because Escape is bound as an action in the `TextInput` key
     /// context and a matched binding consumes the keystroke.
-    fn on_key(&mut self, event: &gpui::KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "escape" if self.settings_open => {
                 self.settings_open = false;
@@ -725,7 +820,11 @@ impl TeleprompterWindow {
             }
             _ => {
                 if let Some(action) = shot_key(&event.keystroke) {
-                    self.mark_shot(action, cx);
+                    self.mark_shot(action, window, cx);
+                } else if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                    && !event.keystroke.modifiers.modified()
+                {
+                    self.go(window, cx);
                 }
             }
         }
@@ -909,47 +1008,180 @@ impl TeleprompterWindow {
     }
 
     /// The shot on screen: its place in the list and title, what must be on
-    /// screen, then its lines at the script's size.
-    fn render_shot(&self, shots: &Shots) -> impl IntoElement {
+    /// screen, then its lines at the script's size, scrolling with the
+    /// recording until the last one has gone by -- then the STOP cue.
+    fn render_shot(&self, shots: &Shots, window: &Window) -> impl IntoElement {
         let theme = self.theme;
         let shot = shots.current();
+        // Room under the last line for it to scroll out of view.
+        let tail =
+            (f32::from(window.viewport_size().height) - HEADER_HEIGHT - FOOTER_HEIGHT).max(0.);
         div()
-            .id("shot")
+            .relative()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .px(px(32.))
+                    .pt(px(8.))
+                    .text_center()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(Hsla::from(theme.gray_9))
+                            .child(format!(
+                                "{}/{} \u{b7} {}",
+                                shots.index() + 1,
+                                shots.list.shots.len(),
+                                shot.title
+                            )),
+                    )
+                    .when_some(shot.on_screen.clone(), |this, on_screen| {
+                        this.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(Hsla::from(theme.blue_10))
+                                .child(format!("On screen: {on_screen}")),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .id("shot")
+                    .track_scroll(&self.scroll)
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .px(px(32.))
+                    .pt(px(6.))
+                    .text_center()
+                    .children(shot.lines.iter().map(|line| {
+                        div()
+                            .text_size(px(self.state.font_size))
+                            .line_height(px(self.state.font_size * self.state.line_height))
+                            .text_color(Hsla::from(theme.gray_12))
+                            .child(line.text.clone())
+                    }))
+                    .child(div().h(px(tail)).flex_shrink_0()),
+            )
+            .when(shots.cue == Cue::Stop, |this| {
+                let last = shots.index() + 1 == shots.list.shots.len();
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(6.))
+                        .bg(Theme::with_alpha(theme.gray_1, 0.6))
+                        .child(
+                            div()
+                                .text_size(px(self.state.font_size * 2.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(Hsla::from(theme.red_9))
+                                .child("STOP"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(Hsla::from(theme.gray_11))
+                                .child(if last {
+                                    "Last shot: stop the recording"
+                                } else {
+                                    "Next shot when ready"
+                                }),
+                        ),
+                )
+            })
+    }
+
+    /// Between shots, the recording paused: the shot Go starts, large, and
+    /// Go -- once pressed, its 3-2-1.
+    fn render_card(
+        &self,
+        shots: &Shots,
+        card: &shots::Shot,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let size = self.state.font_size;
+        let index = shots
+            .list
+            .shots
+            .iter()
+            .position(|shot| std::ptr::eq(shot, card))
+            .unwrap_or(0);
+        let label = match shots.cue {
+            Cue::Ready(shots::Action::Retake) | Cue::Countdown(shots::Action::Retake) => "Retake",
+            _ => "Next shot",
+        };
+        let count = self
+            .countdown
+            .map(|started| shots::countdown(started.elapsed().as_millis() as u64).unwrap_or(1));
+        div()
+            .id("card")
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(10.))
             .px(px(32.))
-            .py(px(8.))
             .text_center()
             .child(
                 div()
                     .text_size(px(12.))
                     .text_color(Hsla::from(theme.gray_9))
                     .child(format!(
-                        "{}/{} \u{b7} {}",
-                        shots.index() + 1,
-                        shots.list.shots.len(),
-                        shot.title
+                        "{label} \u{b7} {}/{}",
+                        index + 1,
+                        shots.list.shots.len()
                     )),
             )
-            .when_some(shot.on_screen.clone(), |this, on_screen| {
+            .child(
+                div()
+                    .text_size(px(size * shots::CARD_SCALE))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(Hsla::from(theme.gray_12))
+                    .child(card.title.clone()),
+            )
+            .when_some(card.on_screen.clone(), |this, on_screen| {
                 this.child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(px(size))
                         .text_color(Hsla::from(theme.blue_10))
                         .child(format!("On screen: {on_screen}")),
                 )
             })
-            .children(shot.lines.iter().map(|line| {
-                div()
-                    .text_size(px(self.state.font_size))
-                    .line_height(px(self.state.font_size * self.state.line_height))
+            .child(match count {
+                Some(count) => div()
+                    .text_size(px(size * 2.5))
+                    .font_weight(FontWeight::BOLD)
                     .text_color(Hsla::from(theme.gray_12))
-                    .child(line.text.clone())
-            }))
+                    .child(count.to_string())
+                    .into_any_element(),
+                None => self
+                    .pill()
+                    .id("go")
+                    .px(px(28.))
+                    .text_size(px(16.))
+                    .text_color(Hsla::from(theme.gray_12))
+                    .child("Go")
+                    .hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.11)))
+                    .on_click(cx.listener(|this, _, window, cx| this.go(window, cx)))
+                    .into_any_element(),
+            })
     }
 
     /// A text pill for Next shot and Retake with its global chord, dimmed
@@ -975,8 +1207,8 @@ impl TeleprompterWindow {
             .when(!live, |this| this.opacity(0.3))
             .when(live, |this| {
                 this.hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.11)))
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.mark_shot(action, cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.mark_shot(action, window, cx);
                     }))
             })
     }
@@ -1299,6 +1531,18 @@ impl TeleprompterWindow {
             ))
             .on_click(on_click)
     }
+}
+
+/// Pause or resume the recording, unless it is already there or a pause or
+/// resume is still on its way.
+fn set_recording_paused(paused: bool, cx: &mut gpui::App) {
+    RecordingSession::global(cx).update(cx, |session, cx| {
+        if matches!(session.phase, Phase::Recording { paused: now } if now != paused)
+            && !session.pause_pending()
+        {
+            session.toggle_pause(cx);
+        }
+    });
 }
 
 /// The teleprompter's own shot keys: bare N or Right, bare R. A chord -- the

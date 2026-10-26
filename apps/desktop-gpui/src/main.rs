@@ -61,6 +61,7 @@ mod main_window;
 mod media_access;
 mod menus;
 mod mode_select_window;
+mod natural_zoom;
 mod onboarding_audio;
 mod onboarding_doodles;
 mod onboarding_window;

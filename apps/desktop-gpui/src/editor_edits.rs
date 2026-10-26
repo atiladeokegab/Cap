@@ -27,9 +27,10 @@
 
 use cap_project::{
     AudioTrackSegment, Camera3DProperties, Camera3DSegment, CaptionTrackSegment,
-    ClipSpeedAudioMode, CursorClickEvent, GlideDirection, KeyboardTrackSegment, MaskKind,
-    MaskSegment, OverlayTrack, ProjectConfiguration, SceneMode, SceneSegment, TextSegment,
-    TimelineConfiguration, TimelineSegment, XY, ZoomMode, ZoomSegment, mask_effect_contract,
+    ClipSpeedAudioMode, CursorClickEvent, CursorMoveEvent, GlideDirection, KeyboardTrackSegment,
+    MaskKind, MaskSegment, OverlayTrack, ProjectConfiguration, SceneMode, SceneSegment,
+    ScreenMovementSpring, TextSegment, TimelineConfiguration, TimelineSegment, XY, ZoomMode,
+    ZoomSegment, mask_effect_contract,
 };
 
 use crate::editor_timeline::{self, Segment, TrackKind};
@@ -2103,9 +2104,6 @@ pub fn clip_trim_end(
 // Auto zoom
 // ---------------------------------------------------------------------------
 
-/// `DEFAULT_AUTO_ZOOM_AMOUNT` (`src-tauri/src/recording.rs:3704`).
-pub const DEFAULT_AUTO_ZOOM_AMOUNT: f64 = 2.0;
-
 pub fn generate_zoom_segments_for_timeline(
     clicks_by_clip: &[Vec<CursorClickEvent>],
     timeline: &TimelineConfiguration,
@@ -2150,88 +2148,124 @@ pub fn generate_zoom_segments_for_timeline(
     generate_zoom_segments_from_clicks(mapped, timeline.duration(), zoom_amount)
 }
 
-/// `generate_zoom_segments_from_clicks_impl`
-/// (`src-tauri/src/recording.rs:3706-3782`), the algorithm behind the Tauri
-/// command the empty zoom track's generate button invokes: every click grows
-/// into a padded interval (300ms before, 2.5s after), clicks in the last
-/// second are ignored, intervals closer than 2.5s merge, and the result is
-/// clamped inside the recording. The Tauri signature also takes the cursor
-/// *moves* and ignores them; this one does not pretend to want them.
+/// Critically damped, settling (2%) in about 0.75 s where Cap's default
+/// spring takes 0.55 s: [`crate::natural_zoom::EASE_MS`].
+pub const NATURAL_ZOOM_SPRING: ScreenMovementSpring = ScreenMovementSpring {
+    stiffness: 140.0,
+    damping: 35.5,
+    mass: 2.25,
+};
+
+/// What natural zoom reads off one recording clip, all on its cursor clock
+/// (ms): moves, clicks, key presses, and the `zoom: none` shots' spans (to
+/// the clip's end when open).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClipActivity {
+    pub moves: Vec<CursorMoveEvent>,
+    pub clicks: Vec<CursorClickEvent>,
+    pub keys_ms: Vec<f64>,
+    pub zoomless_ms: Vec<(f64, Option<f64>)>,
+}
+
+/// The generate button's zoom track (fork): [`crate::natural_zoom`] over
+/// every clip box's activity, mapped onto the timeline like the stock pass,
+/// with a cut at each clip box that no zoom crosses.
+pub fn generate_natural_zoom_for_timeline(
+    clips: &[ClipActivity],
+    timeline: &TimelineConfiguration,
+) -> Vec<ZoomSegment> {
+    use crate::natural_zoom::{Click, Move, natural_zoom};
+    let holds = timeline.hold_windows();
+    let offsets = crate::editor_timeline::clip_timeline_offsets(timeline);
+    let (mut moves, mut clicks, mut keys, mut quiet) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (index, (segment, offset)) in timeline.segments.iter().zip(offsets).enumerate() {
+        if !segment.start.is_finite()
+            || !segment.end.is_finite()
+            || !segment.timescale.is_finite()
+            || segment.timescale <= 0.0
+            || segment.end <= segment.start
+        {
+            continue;
+        }
+        let Some(clip) = clips.get(segment.recording_clip as usize) else {
+            continue;
+        };
+        let (from, to) = (segment.start * 1000.0, segment.end * 1000.0);
+        let inside = |ms: f64| (from..to).contains(&ms);
+        let out = |ms: f64| {
+            let effective = offset + (ms / 1000.0 - segment.start) / segment.timescale;
+            effective_to_output(&holds, effective) * 1000.0
+        };
+        moves.extend(
+            clip.moves
+                .iter()
+                .filter(|m| inside(m.time_ms))
+                .map(|m| Move {
+                    time_ms: out(m.time_ms),
+                    x: m.x,
+                    y: m.y,
+                }),
+        );
+        clicks.extend(
+            clip.clicks
+                .iter()
+                .filter(|c| inside(c.time_ms))
+                .map(|c| Click {
+                    time_ms: out(c.time_ms),
+                    down: c.down,
+                }),
+        );
+        keys.extend(
+            clip.keys_ms
+                .iter()
+                .copied()
+                .filter(|ms| inside(*ms))
+                .map(out),
+        );
+        for &(start, end) in &clip.zoomless_ms {
+            let (start, end) = (start.max(from), end.unwrap_or(f64::INFINITY).min(to));
+            if start < end {
+                quiet.push((out(start), out(end)));
+            }
+        }
+        if index > 0 {
+            let cut = out(from);
+            quiet.push((cut, cut));
+        }
+    }
+    natural_zoom(&moves, &clicks, &keys, timeline.duration() * 1000.0, &quiet)
+        .into_iter()
+        .map(|zoom| auto_zoom_segment(zoom.start_ms / 1000.0, zoom.end_ms / 1000.0, zoom.amount))
+        .collect()
+}
+
+/// Cap's click-per-zoom pass ([`crate::natural_zoom::stock`]) as zoom
+/// segments. The Tauri signature also takes the cursor *moves* and ignores
+/// them; this one does not pretend to want them.
 pub fn generate_zoom_segments_from_clicks(
-    mut clicks: Vec<CursorClickEvent>,
+    clicks: Vec<CursorClickEvent>,
     max_duration: f64,
     zoom_amount: f64,
 ) -> Vec<ZoomSegment> {
-    const MS_PER_SECOND: f64 = 1000.0;
-    const START_MIN_MS: f64 = 1.0;
-    const CLICK_PRE_PADDING_MS: f64 = 300.0;
-    const CLICK_POST_PADDING_MS: f64 = 2500.0;
-    const CLICK_END_CLAMP_PADDING_MS: f64 = 800.0;
-    const TRAILING_CLICK_IGNORE_MS: f64 = 1000.0;
-    const MERGE_GAP_MS: f64 = 2500.0;
-
-    if max_duration <= 0.0 {
-        return Vec::new();
-    }
-
-    let duration_ms = max_duration * MS_PER_SECOND;
-    let click_cutoff_ms = duration_ms - TRAILING_CLICK_IGNORE_MS;
-    let end_limit_ms = duration_ms - CLICK_END_CLAMP_PADDING_MS;
-    if click_cutoff_ms <= 0.0 || end_limit_ms <= START_MIN_MS {
-        return Vec::new();
-    }
-
-    clicks.sort_by(|a, b| {
-        a.time_ms
-            .partial_cmp(&b.time_ms)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let mut intervals: Vec<(f64, f64)> = Vec::new();
-    for click in clicks {
-        let time_ms = click.time_ms.floor();
-        if time_ms >= click_cutoff_ms {
-            continue;
-        }
-
-        let start = (time_ms - CLICK_PRE_PADDING_MS).max(START_MIN_MS);
-        let end = (time_ms + CLICK_POST_PADDING_MS).min(end_limit_ms);
-
-        if end > start {
-            intervals.push((start, end));
-        }
-    }
-
-    if intervals.is_empty() {
-        return Vec::new();
-    }
-
-    intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut merged: Vec<(f64, f64)> = Vec::new();
-    for interval in intervals {
-        if let Some(last) = merged.last_mut()
-            && interval.0 <= last.1 + MERGE_GAP_MS
-        {
-            last.1 = last.1.max(interval.1);
-            continue;
-        }
-        merged.push(interval);
-    }
-
-    merged
+    let times: Vec<f64> = clicks.iter().map(|click| click.time_ms).collect();
+    crate::natural_zoom::stock(&times, max_duration * 1000.0)
         .into_iter()
-        .map(|(start, end)| ZoomSegment {
-            start: start.round() / MS_PER_SECOND,
-            end: end.round() / MS_PER_SECOND,
-            amount: zoom_amount,
-            mode: ZoomMode::Auto,
-            glide_direction: GlideDirection::None,
-            glide_speed: 0.5,
-            instant_animation: false,
-            edge_snap_ratio: 0.25,
-        })
+        .map(|(start, end)| auto_zoom_segment(start / 1000.0, end / 1000.0, zoom_amount))
         .collect()
+}
+
+fn auto_zoom_segment(start: f64, end: f64, amount: f64) -> ZoomSegment {
+    ZoomSegment {
+        start,
+        end,
+        amount,
+        mode: ZoomMode::Auto,
+        glide_direction: GlideDirection::None,
+        glide_speed: 0.5,
+        instant_animation: false,
+        edge_snap_ratio: 0.25,
+    }
 }
 
 /// `splitClipSegment(time, index)` (`ED/context.ts:512-580`).
@@ -3578,6 +3612,69 @@ mod tests {
             time_ms,
             down: true,
         }
+    }
+
+    /// Each zoom move eases over 0.6 to 0.9 s: the time the spring takes to
+    /// settle within 2% of a step, which Cap's default misses.
+    #[test]
+    fn the_natural_zoom_spring_eases_each_move_over_0_6_to_0_9_s() {
+        let settle = |spring: ScreenMovementSpring| {
+            let (mut x, mut v, mut last) = (0.0_f64, 0.0_f64, 0.0);
+            let dt = 1e-4;
+            for step in 1..50_000 {
+                let force =
+                    -f64::from(spring.stiffness) * (x - 1.0) - f64::from(spring.damping) * v;
+                v += force / f64::from(spring.mass) * dt;
+                x += v * dt;
+                if (x - 1.0).abs() > 0.02 {
+                    last = f64::from(step) * dt;
+                }
+            }
+            last
+        };
+        let natural = settle(NATURAL_ZOOM_SPRING);
+        assert!((0.6..=0.9).contains(&natural), "{natural}");
+        assert!((natural * 1000.0 - crate::natural_zoom::EASE_MS).abs() < 50.0);
+        assert!(settle(ScreenMovementSpring::default()) < 0.6);
+    }
+
+    #[test]
+    fn natural_zoom_maps_each_clip_and_skips_zoomless_shots() {
+        let project = two_clip_config();
+        let timeline = project.timeline.as_ref().unwrap();
+        let activity = |zoomless_ms| ClipActivity {
+            moves: vec![CursorMoveEvent {
+                active_modifiers: Vec::new(),
+                cursor_id: String::new(),
+                time_ms: 0.0,
+                x: 0.5,
+                y: 0.5,
+            }],
+            clicks: (0..8)
+                .map(|n| click(1000.0 + f64::from(n) * 400.0))
+                .collect(),
+            keys_ms: Vec::new(),
+            zoomless_ms,
+        };
+        let zooms = generate_natural_zoom_for_timeline(
+            &[activity(vec![(0.0, None)]), activity(Vec::new())],
+            timeline,
+        );
+        // Clip 1 starts at 10 s: in 300 ms before its first click, out 2 s
+        // after its last; clip 0's shot says `zoom: none`.
+        let bounds: Vec<_> = zooms
+            .iter()
+            .map(|zoom| (zoom.start, zoom.end, zoom.amount))
+            .collect();
+        assert_eq!(bounds, vec![(10.7, 15.8, 2.0)]);
+        let both = generate_natural_zoom_for_timeline(
+            &[activity(Vec::new()), activity(Vec::new())],
+            timeline,
+        );
+        // Without it clip 0 zooms, and the 35% budget leaves clip 1 too
+        // little for a second.
+        let starts: Vec<_> = both.iter().map(|zoom| zoom.start).collect();
+        assert_eq!(starts, vec![0.7]);
     }
 
     /// Two clicks a second apart merge into one segment, a distant one stands
