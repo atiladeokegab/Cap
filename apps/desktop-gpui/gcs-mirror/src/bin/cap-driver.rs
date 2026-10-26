@@ -224,6 +224,8 @@ fn shots_op(request: &Value) -> Result<Value, String> {
             shots.mark(action, take, time).map_err(|e| e.to_string())?;
         }
     }
+    // The end of the script settles like `settle` before reporting.
+    wait(None, &mut reads, &mut shots, &mut warning, &mut in_flight);
     let Some(shots) = shots else {
         return Ok(json!({ "mode": "stock", "error": warning, "warning": warning, "marks": [] }));
     };
