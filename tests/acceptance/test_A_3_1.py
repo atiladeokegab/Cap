@@ -33,3 +33,21 @@ def test_shotlist_loads_content_and_malformed_input_falls_back(driver, xml_serve
             validate_contract("shotlist", invalid)
         rejected = driver("shots", shotlist=invalid, epoch_ms=50000, script=[])
         assert rejected["mode"] == "stock" and rejected["error"]
+
+
+@pytest.mark.parametrize("field", ["title", "on_screen"])
+def test_optional_shotlist_fields_allow_omission_but_reject_explicit_null(
+    driver, field
+):
+    value = shotlist()
+    value["shots"][0].pop("on_screen", None)
+    validate_contract("shotlist", value)
+    assert driver("shots", shotlist=value, epoch_ms=0, script=[])["mode"] == "shots"
+    if field == "title":
+        value["title"] = None
+    else:
+        value["shots"][0]["on_screen"] = None
+    with pytest.raises(AssertionError, match="ValidationError"):
+        validate_contract("shotlist", value)
+    result = driver("shots", shotlist=value, epoch_ms=0, script=[])
+    assert result["mode"] == "stock" and result.get("error")
