@@ -14,11 +14,11 @@ def test_windows_emit_only_changes_on_recording_epoch(driver):
         ],
     )
     lines = result["lines"]
+    for line in lines:
+        validate_contract("windows", line)
     assert [line["time_ms"] for line in lines] == [100, 600, 850]
     assert [line["title"] for line in lines] == ["Démo", "Result", "Result"]
     assert [line["process"] for line in lines] == ["demo.exe", "demo.exe", "other.exe"]
     assert all(line["segment"] == 0 for line in lines)
-    for line in lines:
-        validate_contract("windows", line)
     windows = source("apps/desktop-gpui/src/window_log.rs")
     assert "cfg(windows)" in windows or 'target_os = "windows"' in windows

@@ -38,6 +38,38 @@ def source(path):
     return target.read_text()
 
 
+def validate_contract(name, value, version=None):
+    if version is None:
+        assert (ROOT / "contracts/vendor").is_dir(), (
+            "Missing released vendored contracts"
+        )
+        releases = [
+            p
+            for p in (ROOT / "contracts/vendor").iterdir()
+            if p.is_dir() and re.fullmatch(r"\d+\.\d+\.\d+", p.name)
+        ]
+        assert len(releases) == 1, "Choose the take's exact vendored contracts version"
+        version = releases[0].name
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+    schema = ROOT / "contracts/vendor" / version / (name + ".schema.json")
+    assert schema.is_file(), f"Missing released contract: {schema}"
+    run(
+        [
+            "uv",
+            "run",
+            "--offline",
+            "--no-project",
+            "--with",
+            "jsonschema",
+            "python",
+            "-c",
+            "import json,sys; from jsonschema import validate; validate(json.load(sys.stdin),json.load(open(sys.argv[1])))",
+            str(schema),
+        ],
+        input=json.dumps(value),
+    )
+
+
 @pytest.fixture
 def driver():
     command = shlex.split(
@@ -71,7 +103,7 @@ def workflow_text():
             if not line.lstrip().startswith("#")
         )
         if (
-            re.search(r"\bv\*", text)
+            re.search(r"['\"]?v\*['\"]?(?=\s|$)", text)
             and "workflow_dispatch" in text
             and "windows-2022" in text
         ):
@@ -80,26 +112,6 @@ def workflow_text():
         f"Expected one fork release workflow, found {[str(p) for p, _ in candidates]}"
     )
     return candidates[0][1]
-
-
-def validate_contract(name, value, version=None):
-    """Validate value against contracts/vendor/<version>/<name>.schema.json (D23)."""
-    import jsonschema
-
-    vendor = ROOT / "contracts/vendor"
-    if version is None:
-        versions = (
-            [p.name for p in vendor.iterdir() if p.is_dir()] if vendor.is_dir() else []
-        )
-        assert len(versions) == 1, (
-            "Vendor exactly one film contracts version in contracts/vendor/<version>/"
-        )
-        version = versions[0]
-    schema = vendor / version / f"{name}.schema.json"
-    assert schema.is_file(), (
-        f"Required implementation missing: contracts/vendor/{version}/{name}.schema.json"
-    )
-    jsonschema.validate(value, json.loads(schema.read_text()))
 
 
 def digest(data):

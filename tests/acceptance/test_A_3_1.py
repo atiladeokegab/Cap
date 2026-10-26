@@ -1,16 +1,15 @@
 import json
 
-import jsonschema
 import pytest
 from conftest import shotlist, validate_contract
 
 
 def test_shotlist_loads_content_and_malformed_input_falls_back(driver, xml_server):
     good = shotlist()
-    validate_contract("shotlist", good)
     result = driver(
         "shots", shotlist=good, epoch_ms=50000, elapsed_offset_ms=9000, script=[]
     )
+    validate_contract("shotlist", good)
     assert result["mode"] == "shots"
     for field in ("title", "on_screen"):
         assert result["current"][field] == good["shots"][0][field]
@@ -30,7 +29,7 @@ def test_shotlist_loads_content_and_malformed_input_falls_back(driver, xml_serve
     assert fetched["current"] == result["current"]
     assert any(method == "GET" for method, *_ in xml_server.requests)
     for invalid in ({}, {"shots": []}, {"shots": [{"shot_id": 17}]}):
-        with pytest.raises(jsonschema.ValidationError):
+        with pytest.raises(AssertionError, match="ValidationError"):
             validate_contract("shotlist", invalid)
         rejected = driver("shots", shotlist=invalid, epoch_ms=50000, script=[])
         assert rejected["mode"] == "stock" and rejected["error"]

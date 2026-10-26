@@ -12,6 +12,8 @@ def test_final_manifest_is_last_complete_hashed_and_versioned(mirror):
     assert puts[0][0].endswith("/stop.json")
     assert puts[-1][0].endswith("/take-manifest.json")
     manifest = json.loads(puts[-1][1])
+    validate_contract("take-manifest", manifest, manifest["contracts_version"])
+    validate_contract("stop", json.loads(puts[0][1]), manifest["contracts_version"])
     files = {item["path"]: item for item in manifest["files"]}
     assert len(files) == len(manifest["files"])
     assert set(files) == set(expected)
@@ -25,6 +27,5 @@ def test_final_manifest_is_last_complete_hashed_and_versioned(mirror):
     assert re.fullmatch(r"[a-f0-9]{40}", manifest["fork_commit"])
     assert re.fullmatch(r"\d+\.\d+\.\d+", manifest["contracts_version"])
     assert manifest["project_format_version"] is not None
-    validate_contract("take-manifest", manifest, manifest["contracts_version"])
     for relative, body in expected.items():
         assert (mirror.take / relative).read_bytes() == body
