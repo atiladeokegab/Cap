@@ -1,11 +1,11 @@
 //! The in-progress recording bar -- `in-progress-recording.tsx`, natively.
 //!
-//! A 320x150 transparent panel whose visible content is a 40px card hugging the
-//! bottom: stop button with the elapsed timer on the left, mic indicator and
-//! action buttons on the right, a drag handle on the trailing edge. The window
-//! itself is a non-activating panel at the maximum window level (see
-//! `app_windows`), so the buttons work without pulling focus from whatever is
-//! being recorded.
+//! A 320x150 transparent panel whose visible content is a floating pill hugging
+//! the bottom (the reference design, sized by `theme::look`): red stop disc with the
+//! elapsed timer on the left, mic indicator and action buttons on the right, a
+//! drag handle on the trailing edge. The window itself is a non-activating
+//! panel at the maximum window level (see `app_windows`), so the buttons work
+//! without pulling focus from whatever is being recorded.
 
 use std::time::Duration;
 
@@ -16,7 +16,7 @@ use gpui::{
 };
 
 use crate::i18n::tr;
-use crate::theme::LocaleFont as _;
+use crate::theme::{LocaleFont as _, look};
 use crate::{
     feeds::Feeds,
     recording::RecordingMode,
@@ -145,22 +145,26 @@ impl ControlsWindow {
         let theme = self.theme;
         div()
             .id(id)
-            .w(px(28.))
-            .h(px(32.))
+            .size(px(look::BAR_BUTTON))
             .flex_shrink_0()
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(8.))
+            .rounded_full()
             .when(!disabled, |this| {
-                this.hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.06)))
-                    .active(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.10)))
+                this.hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.08)))
+                    .active(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.12)))
             })
-            .child(svg().path(icon).size(px(20.)).text_color(if disabled {
-                Theme::with_alpha(theme.gray_11, 0.5)
-            } else {
-                theme.gray_11.into()
-            }))
+            .child(
+                svg()
+                    .path(icon)
+                    .size(px(look::BAR_ICON))
+                    .text_color(if disabled {
+                        Theme::with_alpha(theme.gray_11, 0.5)
+                    } else {
+                        theme.gray_11.into()
+                    }),
+            )
     }
 
     fn render_stop(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -193,16 +197,21 @@ impl ControlsWindow {
 
         div()
             .id("stop")
+            .group("stop")
             .min_w_0()
             .flex_1()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(4.))
-            .rounded(px(8.))
-            .py(px(4.))
-            .px(px(6.))
-            .text_color(theme.red_300)
+            .gap(px(look::SPACE_2))
+            .rounded_full()
+            .py(px(look::SPACE_1))
+            // Puts the disc as far from the pill's end as from its top.
+            .pl(px(
+                (look::BAR_HEIGHT - 2. - look::BAR_STOP) / 2. - look::SPACE_1
+            ))
+            .pr(px(look::SPACE_2))
+            .text_color(theme.gray_12)
             .when(can_stop, |this| {
                 this.hover(|style| style.bg(Theme::with_alpha(theme.red_300, 0.08)))
                     .active(|style| style.bg(Theme::with_alpha(theme.red_300, 0.12)))
@@ -212,18 +221,31 @@ impl ControlsWindow {
             })
             .when(!can_stop, |this| this.opacity(0.6))
             .child(
-                svg()
-                    .path("icons/stop-circle.svg")
-                    .size(px(20.))
+                div()
+                    .size(px(look::BAR_STOP))
                     .flex_shrink_0()
-                    .text_color(theme.red_300),
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(theme.red_9)
+                    .when(can_stop, |this| {
+                        this.group_hover("stop", |style| style.bg(theme.red_10))
+                    })
+                    .child(
+                        div()
+                            .size(px(look::BAR_STOP_GLYPH))
+                            .rounded(px(3.))
+                            .bg(gpui::white()),
+                    ),
             )
             .child(
                 div()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(14.))
-                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_size(px(look::BODY_SIZE))
+                    .line_height(px(look::BODY_LINE))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(label),
             )
     }
@@ -265,23 +287,27 @@ impl ControlsWindow {
 
         div()
             .id("microphone")
-            .w(px(28.))
-            .h(px(32.))
+            .size(px(look::BAR_BUTTON))
             .flex_shrink_0()
             .relative()
             .flex()
             .items_center()
             .justify_center()
             .when(can_mute, |this| {
-                this.rounded(px(8.))
-                    .hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.06)))
-                    .active(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.10)))
+                this.rounded_full()
+                    .hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.08)))
+                    .active(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.12)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.session
                             .update(cx, |session, cx| session.toggle_mic_mute(cx));
                     }))
             })
-            .child(svg().path(icon).size(px(20.)).text_color(icon_color))
+            .child(
+                svg()
+                    .path(icon)
+                    .size(px(look::BAR_ICON))
+                    .text_color(icon_color),
+            )
             .when(self.has_microphone && !muted, |this| {
                 this.child(self.level_bar.clone())
             })
@@ -391,25 +417,19 @@ impl ControlsWindow {
         };
 
         div()
-            .h(px(40.))
+            .h(px(look::BAR_HEIGHT))
             .flex_shrink_0()
             .w_full()
             .flex()
             .flex_row()
             .items_stretch()
             .overflow_hidden()
-            .rounded(px(16.))
-            .bg(theme.gray_1)
+            .rounded(px(look::BAR_RADIUS))
+            .bg(Theme::with_alpha(theme.gray_2, look::BAR_OPACITY))
             .border_1()
-            .border_color(theme.gray_5)
+            .border_color(theme.gray_6)
             .when(paused, |this| this.border_color(theme.amber_6))
-            .shadow(vec![gpui::BoxShadow {
-                color: gpui::hsla(0., 0., 0., 0.1),
-                offset: gpui::point(px(0.), px(1.)),
-                blur_radius: px(3.),
-                spread_radius: px(0.),
-                inset: false,
-            }])
+            .shadow(crate::theme::bar_shadow())
             .child(
                 div()
                     .flex()
@@ -418,15 +438,15 @@ impl ControlsWindow {
                     .flex_row()
                     .items_center()
                     .justify_between()
-                    .gap(px(4.))
-                    .p(px(4.))
+                    .gap(px(look::SPACE_1))
+                    .px(px(look::SPACE_1))
                     .child(self.render_stop(cx))
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap(px(2.))
+                            .gap(px(look::SPACE_1 / 2.))
                             .flex_shrink_0()
                             .child(self.render_microphone(cx))
                             .child(
@@ -484,16 +504,16 @@ impl ControlsWindow {
             .child(
                 div()
                     .id("drag")
-                    .w(px(24.))
+                    .w(px(look::BAR_HANDLE))
                     .flex_shrink_0()
                     .cursor_move()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded_r(px(15.))
+                    .rounded_r(px(look::BAR_RADIUS - 1.))
                     .border_l_1()
-                    .border_color(theme.gray_5)
-                    .p(px(4.))
+                    .border_color(theme.gray_6)
+                    .pr(px(look::SPACE_1))
                     .hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.04)))
                     .on_mouse_down(MouseButton::Left, |_, window, _| {
                         window.start_window_move();
@@ -535,14 +555,14 @@ impl Render for ControlsWindow {
                         .w_full()
                         .flex()
                         .items_start()
-                        .gap(px(8.))
-                        .mb(px(8.))
-                        .rounded(px(12.))
+                        .gap(px(look::SPACE_2))
+                        .mb(px(look::SPACE_2))
+                        .rounded(px(look::RADIUS_TILE))
                         .border_1()
                         .border_color(Theme::with_alpha(self.theme.red_9, 0.4))
-                        .bg(self.theme.gray_1)
-                        .p(px(8.))
-                        .text_size(px(12.))
+                        .bg(self.theme.gray_2)
+                        .p(px(look::SPACE_2))
+                        .text_size(px(look::LABEL_SIZE))
                         .text_color(self.theme.red_11)
                         .child(
                             svg()
