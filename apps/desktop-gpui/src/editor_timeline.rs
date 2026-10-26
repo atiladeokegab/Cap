@@ -2775,9 +2775,18 @@ fn render_segment(
         }
     }
 
+    // Canvid sets its lane labels in a dark ink of the lane's own hue; the
+    // lighter stop would read mid-green on the gradient.
+    let label_color = match gradient {
+        Some((from, _)) => Hsla {
+            l: 0.18,
+            ..Hsla::from(from)
+        },
+        None => color,
+    };
     fill = fill.child(render_label(
         theme,
-        color,
+        label_color,
         segment,
         visible_width,
         center_x,
