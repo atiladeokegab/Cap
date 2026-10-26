@@ -2,6 +2,9 @@
 # online step that fetches everything it needs (docs/stack.md).
 # Mirrors the Linux "Test GPUI desktop" job in .github/workflows/ci.yml.
 
+# rustup's cargo for every recipe, also from shells without ~/.cargo/bin (hub verify, xvfb-run).
+export PATH := $(HOME)/.cargo/bin:$(PATH)
+
 GPUI := apps/desktop-gpui
 TOOLCHAIN := 1.95.0
 NATIVE_LIBS := $(CURDIR)/target/native-deps/lib:$(CURDIR)/target/debug
