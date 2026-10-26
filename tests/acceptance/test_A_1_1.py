@@ -15,8 +15,10 @@ def check_release(text):
     assert jobs
     assert len(re.findall(r"(?m)^  [\w-]+:\s*$", jobs.group(1))) == 1
     assert re.search(r"runs-on:\s*['\"]?windows-2022['\"]?\s*(?:\n|$)", jobs.group(1))
-    assert re.search(r"uses:\s*\S*(?:rust-cache|cache@)", jobs.group(1), re.I)
-    assert not re.search(r"signpath|crabnebula|discord|turbo|apple|macos", text, re.I)
+    assert re.search(r"uses:\s*\S*(?:rust-cache|cache@)", jobs.group(1), re.IGNORECASE)
+    assert not re.search(
+        r"signpath|crabnebula|discord|turbo|apple|macos", text, re.IGNORECASE
+    )
 
 
 def test_release_has_only_the_cached_windows_job():

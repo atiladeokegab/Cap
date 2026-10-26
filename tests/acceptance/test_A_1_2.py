@@ -10,4 +10,6 @@ def test_updater_disabled_and_telemetry_opt_in():
     main = re.sub(r"//[^\n]*", "", source("apps/desktop-gpui/src/main.rs"))
     assert not re.search(r"updates\s*::\s*schedule_startup_check\s*\(", main)
     store = re.sub(r"//[^\n]*", "", source("apps/desktop-gpui/src/store.rs"))
-    assert re.search(r'bool_at\s*\(\s*general\s*,\s*"enableTelemetry"\s*,\s*false\s*\)', store)
+    assert re.search(
+        r'bool_at\s*\(\s*general\s*,\s*"enableTelemetry"\s*,\s*false\s*\)', store
+    )
