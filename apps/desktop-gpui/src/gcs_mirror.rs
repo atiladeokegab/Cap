@@ -2,14 +2,10 @@
 //! while it records (design D10). Without that file nothing starts. The
 //! upload logic lives in the `cap-gcs-mirror` crate; this is the app's wiring.
 
-use cap_gcs_mirror::{Config, Mirror};
+use cap_gcs_mirror::{Config, Mirror, Worker};
 use std::{
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -19,8 +15,7 @@ const STOP_DRAIN: Duration = Duration::from_secs(120);
 struct Running {
     take: PathBuf,
     gate: Option<cap_recording::RecordingStartGate>,
-    stopping: Arc<AtomicBool>,
-    stop: mpsc::Sender<(u64, mpsc::Sender<()>)>,
+    worker: Worker,
 }
 
 static RUNNING: Mutex<Vec<Running>> = Mutex::new(Vec::new());
@@ -39,43 +34,16 @@ fn open(config: Config, take: &Path) -> Option<Mirror> {
 
 /// Starts mirroring a Studio take that has just begun recording.
 pub fn start(take: &Path, gate: Option<cap_recording::RecordingStartGate>) {
-    let Some(mut mirror) = config().and_then(|config| open(config, take)) else {
+    let Some(mirror) = config().and_then(|config| open(config, take)) else {
         return;
     };
-    let stopping = Arc::new(AtomicBool::new(false));
-    let (stop, stops) = mpsc::channel::<(u64, mpsc::Sender<()>)>();
-    let (scan_stopping, dir) = (stopping.clone(), take.to_path_buf());
-    let spawned = std::thread::Builder::new()
-        .name("gcs-mirror".into())
-        .spawn(move || {
-            loop {
-                match stops.recv_timeout(SCAN_EVERY) {
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        // A deleted take has nothing left to mirror.
-                        if !dir.is_dir() {
-                            return;
-                        }
-                        if let Err(error) = mirror.scan(&scan_stopping) {
-                            tracing::debug!(%error, "Mirror scan incomplete; next pass retries");
-                        }
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                    Ok((stopped_at_unix_ms, done)) => {
-                        let report = mirror.stop(stopped_at_unix_ms, STOP_DRAIN);
-                        tracing::info!(?report, "Mirror stop sequence finished");
-                        let _ = done.send(());
-                        if !report.drained {
-                            mirror.drain(None);
-                        }
-                        return;
-                    }
-                }
-            }
-        });
-    if let Err(error) = spawned {
-        tracing::warn!(%error, "Mirror thread did not start");
-        return;
-    }
+    let worker = match mirror.spawn(SCAN_EVERY) {
+        Ok(worker) => worker,
+        Err(error) => {
+            tracing::warn!(%error, "Mirror thread did not start");
+            return;
+        }
+    };
     let mut running = RUNNING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -83,8 +51,7 @@ pub fn start(take: &Path, gate: Option<cap_recording::RecordingStartGate>) {
     running.push(Running {
         take: take.to_path_buf(),
         gate,
-        stopping,
-        stop,
+        worker,
     });
 }
 
@@ -99,26 +66,22 @@ fn stopped_at_unix_ms(gate: Option<&cap_recording::RecordingStartGate>) -> u64 {
         .map_or(0, |since| since.as_millis() as u64)
 }
 
-/// Runs the stop sequence for `take` and blocks until it has frozen the take
-/// and drained for at most 120 s, so it must run before Cap's remux. Uploads
-/// still pending carry on in the background.
-pub fn stop(take: &Path) {
+/// Runs the stop sequence for `take`; it must run before Cap's remux. Blocks
+/// until the take is frozen into the outbox, then for the drain (about
+/// 120 s); uploads still pending carry on in the background. `Err` means the
+/// freeze failed, so the remux must not delete the fragments.
+pub fn stop(take: &Path) -> Result<(), String> {
     let entry = {
         let mut running = RUNNING
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(index) = running.iter().position(|entry| entry.take == take) else {
-            return;
+            return Ok(());
         };
         running.remove(index)
     };
     let at = stopped_at_unix_ms(entry.gate.as_ref());
-    entry.stopping.store(true, Ordering::Relaxed);
-    let (done, finished) = mpsc::channel();
-    if entry.stop.send((at, done)).is_ok() {
-        // The bound is the thread's; the margin covers a scan request in flight.
-        let _ = finished.recv_timeout(STOP_DRAIN + Duration::from_secs(40));
-    }
+    entry.worker.stop(at, STOP_DRAIN)
 }
 
 /// After a restart, finishes uploading every take whose stop ran but whose
@@ -142,8 +105,10 @@ pub fn resume_pending() {
         .spawn(move || {
             for take in pending {
                 // A take whose manifest is in its ledger returns at once.
-                if let Some(mut mirror) = open(config.clone(), &take) {
-                    mirror.drain(None);
+                if let Some(mut mirror) = open(config.clone(), &take)
+                    && let Err(error) = mirror.drain(None)
+                {
+                    tracing::error!(%error, take = %take.display(), "Mirror cannot complete this take");
                 }
             }
         });
