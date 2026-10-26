@@ -35,6 +35,8 @@ use gpui::{Entity, Task};
 
 /// `h-9` on `.cap-window-header`.
 const HEADER_HEIGHT: f32 = 36.;
+/// The window picker's grid: three columns across the Canvid-sized window.
+const PICKER_COLUMNS: f32 = 3.;
 
 /// `h-[42px]` in deviceRowStyles.ts.
 const DEVICE_ROW_HEIGHT: f32 = 42.;
@@ -3894,11 +3896,17 @@ impl MainWindow {
                     .flex_1()
                     .min_h_0()
                     .w_full()
+                    .items_center()
                     .pb(px(4.))
-                    .gap(px(8.))
+                    .gap(px(look::SECTION_GAP))
                     .overflow_y_scroll()
                     .child(self.render_targets(cx))
-                    .child(self.render_base_controls(cx)),
+                    .child(
+                        div()
+                            .w(px(look::START_WIDTH))
+                            .flex_shrink_0()
+                            .child(self.render_base_controls(cx)),
+                    ),
             ),
         }
     }
@@ -5714,7 +5722,7 @@ impl MainWindow {
     /// picker routinely holds, so the grid states the width and the cards take
     /// it with `flex_none`.
     fn target_card_width(&self) -> f32 {
-        (MAIN_WINDOW_WIDTH - 50.) / 2.
+        (MAIN_WINDOW_WIDTH - 42. - 8. * (PICKER_COLUMNS - 1.)) / PICKER_COLUMNS
     }
 
     /// `TargetMenuGrid`: two columns of cards.
@@ -5823,14 +5831,14 @@ impl MainWindow {
             );
         }
 
-        // Two columns, laid out as rows of two. The cards carry their own
-        // width (`target_card_width`), so a lone trailing card keeps half the
-        // row without needing a spacer to hold the other half open.
+        // `PICKER_COLUMNS` columns, laid out as rows. The cards carry their
+        // own width (`target_card_width`), so a short trailing row keeps its
+        // cards' width without needing a spacer to hold the rest open.
         grid.children(
             cards
                 .into_iter()
                 .collect::<Vec<_>>()
-                .chunks_mut(2)
+                .chunks_mut(PICKER_COLUMNS as usize)
                 .map(|pair| {
                     let mut row = div().flex().flex_row().gap(px(8.)).w_full().items_stretch();
                     for card in pair.iter_mut() {
@@ -6477,11 +6485,15 @@ impl MainWindow {
     /// The Canvid start screen: Display, Window and Area as three large cards,
     /// then "Take a Screenshot" and Camera Only side by side underneath.
     fn render_targets(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let rule = move || div().flex_1().h(px(1.)).bg(theme.gray_6);
         div()
             .flex()
             .flex_col()
-            .gap(px(look::SPACE_2))
-            .w_full()
+            .items_center()
+            .gap(px(look::SECTION_GAP))
+            .w(px(look::START_WIDTH))
+            .pt(px(look::SECTION_GAP))
             .flex_shrink_0()
             // Canvid's start screen leads with one large, light question.
             .child(
@@ -6498,20 +6510,30 @@ impl MainWindow {
                 div()
                     .flex()
                     .flex_row()
-                    .gap(px(look::SPACE_2))
-                    .items_stretch()
-                    .w_full()
+                    .gap(px(look::TARGET_CARD_GAP))
                     .child(self.render_split_target(TargetType::Display, cx))
                     .child(self.render_split_target(TargetType::Window, cx))
                     .child(self.render_target_tile(TargetType::Area, cx)),
+            )
+            // Canvid's "or" divider.
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(look::SPACE_2 * 2.))
+                    .w_full()
+                    .text_size(px(look::SECONDARY_LABEL_SIZE))
+                    .text_color(theme.gray_10)
+                    .child(rule())
+                    .child("or")
+                    .child(rule()),
             )
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap(px(look::SPACE_2))
-                    .items_stretch()
-                    .w_full()
+                    .gap(px(look::SPACE_2 * 3.))
                     .child(self.render_take_screenshot())
                     .child(self.render_target_tile(TargetType::CameraOnly, cx)),
             )
@@ -6537,8 +6559,8 @@ impl MainWindow {
         div()
             .relative()
             .flex()
-            .flex_1()
-            .h(px(look::TARGET_CARD_HEIGHT))
+            .flex_none()
+            .size(px(look::TARGET_CARD_SIZE))
             .overflow_hidden()
             .rounded(px(look::RADIUS_CARD))
             .map(|this| glass_button(this, theme, selected))
@@ -6556,8 +6578,8 @@ impl MainWindow {
                     // here from arming the target too.
                     .occlude()
                     .absolute()
-                    .top(px(look::SPACE_1))
-                    .right(px(look::SPACE_1))
+                    .top(px(look::SPACE_2))
+                    .right(px(look::SPACE_2))
                     .flex()
                     .size(px(look::TARGET_CHEVRON))
                     .rounded(px(look::RADIUS_CONTROL - 2.))
@@ -6566,7 +6588,7 @@ impl MainWindow {
                     .child(
                         svg()
                             .path("icons/chevron-down.svg")
-                            .size(px(12.))
+                            .size(px(16.))
                             .text_color(if selected {
                                 theme.blue_11
                             } else {
@@ -6600,11 +6622,12 @@ impl MainWindow {
 
         div()
             .flex()
-            .flex_1()
+            .flex_none()
+            .w(px(look::TARGET_CARD_SIZE))
             .h(px(if target == TargetType::CameraOnly {
                 look::SECONDARY_CARD_HEIGHT
             } else {
-                look::TARGET_CARD_HEIGHT
+                look::TARGET_CARD_SIZE
             }))
             .overflow_hidden()
             .rounded(px(target_radius(target)))
@@ -6663,8 +6686,11 @@ impl MainWindow {
         let label = div()
             .min_w_0()
             .truncate()
-            .text_size(px(look::LABEL_SIZE))
-            .line_height(px(look::LABEL_LINE))
+            .text_size(px(if compact {
+                look::SECONDARY_LABEL_SIZE
+            } else {
+                look::TARGET_LABEL_SIZE
+            }))
             .text_color(label_color)
             .child(target.display_label());
 
@@ -6680,7 +6706,7 @@ impl MainWindow {
             base.flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(look::SPACE_2))
+                .gap(px(look::SECTION_GAP))
                 .child(icon)
                 .child(label)
         }
@@ -6692,11 +6718,16 @@ impl MainWindow {
         let theme = self.theme;
         div()
             .flex()
-            .flex_1()
+            .flex_none()
+            .w(px(look::TARGET_CARD_SIZE))
             .h(px(look::SECONDARY_CARD_HEIGHT))
             .overflow_hidden()
             .rounded(px(look::RADIUS_TILE))
             .map(|this| glass_button(this, theme, false))
+            // Canvid's button is a shade darker than the cards.
+            .when(theme.material.is_none(), |this| {
+                this.bg(theme.gray_3).border_color(theme.gray_7)
+            })
             .child(
                 div()
                     .id("take-screenshot")
@@ -6721,8 +6752,8 @@ impl MainWindow {
                     )
                     .child(
                         div()
-                            .text_size(px(look::LABEL_SIZE))
-                            .line_height(px(look::LABEL_LINE))
+                            .text_size(px(look::SECONDARY_LABEL_SIZE))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.gray_12)
                             .child(tr::tray::take_screenshot()),
                     )

@@ -102,8 +102,10 @@ use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 
 use crate::{assets::Assets, main_window::MainWindow, session::RecordingSession};
 
-const MAIN_WINDOW_WIDTH: f32 = 330.;
-const MAIN_WINDOW_HEIGHT: f32 = 435.;
+/// Sized to Canvid's start screen as measured (its 958px card row with
+/// margins), and short enough for a 1080p display at 125% scale.
+const MAIN_WINDOW_WIDTH: f32 = 1200.;
+const MAIN_WINDOW_HEIGHT: f32 = 800.;
 
 /// The corner radius the native material is clipped to. `radius = 16` for
 /// material `"panel"` on both visual systems in

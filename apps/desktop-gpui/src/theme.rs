@@ -21,26 +21,24 @@ use crate::i18n::Locale;
 use crate::platform::{self, ForcedAppearance, MaterialKind};
 use crate::store::AppTheme;
 
-/// The interface face. Canvid draws in a geometric grotesk (Inter is the
-/// usual stand-in); the bundled Geist is the closest face this app embeds, so
-/// it is used on every platform rather than Segoe UI or SF Pro.
-pub const UI_FONT: &str = "Geist";
+/// The interface face. Canvid draws in a geometric grotesk and Inter is the
+/// measured stand-in, bundled and used on every platform rather than Segoe UI
+/// or SF Pro. Geist stays embedded as its fallback.
+pub const UI_FONT: &str = "Inter";
 
 /// The Canvid look's sizes: one type scale, spacing step and radius set shared
 /// by the start screen, the capture bar and the editor, so the three windows
 /// read as one product. Colours live on [`Theme`]; a pass from the reference
 /// screenshots should only need to edit values here and there.
 pub mod look {
-    /// The start screen's question (Canvid's 44px heading, scaled to the
-    /// 330px window).
-    pub const HEADING_SIZE: f32 = 17.;
-    pub const HEADING_LINE: f32 = 22.;
+    /// The start screen's question: Canvid's 44px heading.
+    pub const HEADING_SIZE: f32 = 44.;
+    pub const HEADING_LINE: f32 = 52.;
     /// Section headings and secondary captions.
     pub const CAPTION_SIZE: f32 = 11.;
     pub const CAPTION_LINE: f32 = 14.;
-    /// Card and button labels.
+    /// Capture bar labels.
     pub const LABEL_SIZE: f32 = 12.;
-    pub const LABEL_LINE: f32 = 16.;
     /// Row text and the capture bar's timer.
     pub const BODY_SIZE: f32 = 13.;
     pub const BODY_LINE: f32 = 18.;
@@ -58,15 +56,24 @@ pub mod look {
     /// Short cards and wide buttons: "Take a Screenshot", Camera Only.
     pub const RADIUS_TILE: f32 = 10.;
 
-    /// The start screen's three target cards. Sized so the cards and the
-    /// device rows fit the 330x435 main window without scrolling.
-    pub const TARGET_CARD_HEIGHT: f32 = 66.;
-    pub const TARGET_ICON: f32 = 24.;
+    /// The start screen as measured from Canvid: three 286px square cards
+    /// 50 apart, a 22px label under each icon, then "or" and a 286x60
+    /// "Take a Screenshot". The main window is sized to hold this column.
+    pub const TARGET_CARD_SIZE: f32 = 286.;
+    pub const TARGET_CARD_GAP: f32 = 50.;
+    pub const START_WIDTH: f32 = TARGET_CARD_SIZE * 3. + TARGET_CARD_GAP * 2.;
+    /// Canvid draws a 120px colour illustration; Cap's glyphs are one colour,
+    /// so they stay smaller to keep the same visual weight.
+    pub const TARGET_ICON: f32 = 72.;
+    pub const TARGET_LABEL_SIZE: f32 = 22.;
     /// The Display and Window cards' corner chevron.
-    pub const TARGET_CHEVRON: f32 = 20.;
+    pub const TARGET_CHEVRON: f32 = 28.;
     /// The "Take a Screenshot" and Camera Only row under the cards.
-    pub const SECONDARY_CARD_HEIGHT: f32 = 40.;
-    pub const SECONDARY_ICON: f32 = 16.;
+    pub const SECONDARY_CARD_HEIGHT: f32 = 60.;
+    pub const SECONDARY_ICON: f32 = 18.;
+    pub const SECONDARY_LABEL_SIZE: f32 = 17.;
+    /// Gaps between the start screen's sections.
+    pub const SECTION_GAP: f32 = 32.;
 
     /// The capture bar: a floating pill.
     pub const BAR_HEIGHT: f32 = 52.;
@@ -567,6 +574,16 @@ pub struct EditorPalette {
     pub accent_2: Rgba,
     pub playhead: Rgba,
     pub thumb: Rgba,
+    /// Idle icons: the rail, the toolbar and the transport.
+    pub icon: Rgba,
+    /// The left rail's selected tile.
+    pub rail_tile: Rgba,
+    /// The clip and zoom lanes: solid top-to-bottom gradients, one colour in
+    /// both themes.
+    pub clip_from: Rgba,
+    pub clip_to: Rgba,
+    pub zoom_from: Rgba,
+    pub zoom_to: Rgba,
     /// `--ed-seg-tint`: how much of a track colour a segment fill carries.
     pub seg_tint: f32,
     /// `--ed-seg-line`: the segment border's alpha.
@@ -607,6 +624,12 @@ impl EditorPalette {
             accent_2: rgb(0x6e80da),
             playhead: rgb(0x4092fd),
             thumb: rgb(0xfcfcfd),
+            icon: rgb(0x515357),
+            rail_tile: rgb(0xededf0),
+            clip_from: rgb(0x42865d),
+            clip_to: rgb(0x6db488),
+            zoom_from: rgb(0x526ada),
+            zoom_to: rgb(0x6e80da),
             seg_tint: 0.13,
             seg_line: 0.34,
             seg_label_base: rgb(0x000000),
@@ -638,6 +661,12 @@ impl EditorPalette {
             accent_2: rgb(0x818cf8),
             playhead: rgb(0xef4444),
             thumb: rgb(0xf4f4f5),
+            icon: rgb(0xa1a1aa),
+            rail_tile: rgba(0xffffff17),
+            clip_from: rgb(0x42865d),
+            clip_to: rgb(0x6db488),
+            zoom_from: rgb(0x526ada),
+            zoom_to: rgb(0x6e80da),
             seg_tint: 0.20,
             seg_line: 0.42,
             seg_label_base: rgb(0xffffff),

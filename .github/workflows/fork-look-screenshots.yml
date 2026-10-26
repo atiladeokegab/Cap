@@ -1,0 +1,99 @@
+name: "fork-look-screenshots"
+
+# A-6.2: screenshots of the Canvid look on Windows, for an independent visual
+# review against the reference screens. Builds the same unsigned installer as
+# fork-windows-release.yml, installs it on a clean windows-2022 runner, and
+# captures three views: the start screen, the bottom capture bar during a short
+# Studio recording, and the editor (with its left rail) that opens after it.
+# Uploads them as the "look-screenshots" artifact. Judging is not done here.
+
+on:
+  workflow_dispatch:
+
+# The called release workflow asks for contents: write; a caller cannot grant
+# less than its callee requests.
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    uses: ./.github/workflows/fork-windows-release.yml
+
+  screenshots:
+    needs: installer
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Download the installer
+        uses: actions/download-artifact@v4
+        with:
+          name: cap-windows-x64-unsigned
+          path: installer
+
+      - name: Set a 1920x1080 desktop
+        shell: pwsh
+        run: |
+          # The runner's desktop starts at 1024x768, smaller than the main window.
+          try { Set-DisplayResolution -Width 1920 -Height 1080 -Force } catch { Write-Warning "Set-DisplayResolution: $_" }
+          Add-Type -AssemblyName System.Windows.Forms
+          "Desktop: $([System.Windows.Forms.Screen]::PrimaryScreen.Bounds)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+      - name: Install Cap silently
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem installer -Filter *.exe | Select-Object -First 1
+          Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait
+          $exe = Get-ChildItem "$env:LOCALAPPDATA", "$env:ProgramFiles" -Recurse -Filter Cap.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw "Cap.exe not found after install" }
+          "CAP_EXE=$($exe.FullName)" | Add-Content $env:GITHUB_ENV
+
+      - name: Seed settings (light theme, onboarding done, editor after recording)
+        shell: pwsh
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP "cap-data"
+          New-Item -ItemType Directory -Force -Path $data, (Join-Path $env:RUNNER_TEMP "shots") | Out-Null
+          '{"general_settings":{"theme":"light","hasCompletedStartup":true,"hasCompletedOnboarding":true,"postStudioRecordingBehaviour":"openEditor"}}' |
+            Set-Content -Encoding utf8NoBOM (Join-Path $data "store")
+          "CAP_GPUI_APP_DATA_DIR=$data" | Add-Content $env:GITHUB_ENV
+          "CAP_GPUI_RECORDINGS_DIR=$(Join-Path $data 'recordings')" | Add-Content $env:GITHUB_ENV
+          "SHOTS=$(Join-Path $env:RUNNER_TEMP 'shots')" | Add-Content $env:GITHUB_ENV
+
+      - name: Capture the three views
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Shot($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $bitmap.Save((Join-Path $env:SHOTS "$name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+            "captured $name.png"
+          }
+          function Stop-Cap { Get-Process Cap -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep 3 }
+
+          # 1. The start screen: a plain launch shows the main window.
+          $env:CAP_GPUI_NO_TRAY = "1"
+          Start-Process -FilePath $env:CAP_EXE
+          Start-Sleep 20
+          Shot "start-screen"
+          Stop-Cap
+
+          # 2. The bottom bar, mid-recording; 3. the editor it opens afterwards.
+          $env:CAP_GPUI_AUTO_RECORD = "studio:12"
+          $env:CAP_GPUI_AUTO_NO_MIC = "1"
+          Start-Process -FilePath $env:CAP_EXE
+          Start-Sleep 18
+          Shot "bottom-bar"
+          Start-Sleep 45
+          Shot "editor-left-rail"
+          Stop-Cap
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: look-screenshots
+          path: ${{ runner.temp }}/shots/*.png
+          if-no-files-found: error

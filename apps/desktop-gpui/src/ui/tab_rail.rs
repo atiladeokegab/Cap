@@ -8,6 +8,9 @@
 //! They were checked against each other and kept apart deliberately -- merging
 //! them would mean inventing a shared component neither app has.
 //!
+//! The Canvid look stands the rail on its side: a vertical icon column down
+//! the sidebar card's left edge, with 52x52 tiles.
+//!
 //! The indicator does not slide (no transform in this gpui rev); the selected
 //! item paints the `size-9 rounded-lg bg-gray-3` box itself, which is what the
 //! editor window has always done.
@@ -57,12 +60,10 @@ type TabHandler = Box<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
 pub struct TabRail {
     id: ElementId,
     items: Vec<TabRailItem>,
-    height: Pixels,
+    width: Pixels,
     box_size: Pixels,
-    box_width: Pixels,
     icon_size: Pixels,
     bg: Hsla,
-    border: Hsla,
     indicator: Hsla,
     hover: Hsla,
     selected_icon: Hsla,
@@ -72,8 +73,8 @@ pub struct TabRail {
 }
 
 impl TabRail {
-    /// The editor's config sidebar rail: a 46px bar on the card surface under
-    /// an `ed-line` hairline, with 40x30 tab boxes and 16px icons.
+    /// The editor's config sidebar rail, as Canvid draws it: a 60px column on
+    /// the card surface, 52x52 tiles with radius 10 and 22px icons.
     pub fn editor(
         theme: &Theme,
         id: impl Into<ElementId>,
@@ -83,25 +84,23 @@ impl TabRail {
         Self {
             id: id.into(),
             items,
-            height: px(46.),
-            box_size: px(30.),
-            box_width: px(40.),
-            icon_size: px(16.),
+            width: px(60.),
+            box_size: px(52.),
+            icon_size: px(22.),
             bg: panel_bg,
-            border: Hsla::from(theme.editor.line),
-            indicator: Hsla::from(theme.editor.ctl_hover),
+            indicator: Hsla::from(theme.editor.rail_tile),
             hover: Hsla::from(theme.editor.ctl),
             selected_icon: Hsla::from(theme.editor.text_1),
-            idle_icon: Hsla::from(theme.editor.text_2),
+            idle_icon: Hsla::from(theme.editor.icon),
             theme: *theme,
             on_select: None,
         }
     }
 
-    /// `h-16` on the editor's rail. Kept a parameter so the call site can go
-    /// on quoting its own metric.
-    pub fn height(mut self, height: Pixels) -> Self {
-        self.height = height;
+    /// The rail's width. Kept a parameter so the call site can go on quoting
+    /// its own metric.
+    pub fn width(mut self, width: Pixels) -> Self {
+        self.width = width;
         self
     }
 
@@ -116,12 +115,10 @@ impl RenderOnce for TabRail {
         let TabRail {
             id,
             items,
-            height,
+            width,
             box_size,
-            box_width,
             icon_size,
             bg,
-            border,
             indicator,
             hover,
             selected_icon,
@@ -140,16 +137,14 @@ impl RenderOnce for TabRail {
             .id(id)
             .relative()
             .flex()
-            .flex_row()
+            .flex_col()
             .items_center()
-            .h(height)
+            .w(width)
+            .h_full()
             .flex_none()
             .overflow_hidden()
-            .rounded_t(px(11.))
-            .justify_around()
-            .px(px(10.))
-            .border_b_1()
-            .border_color(border)
+            .gap(px(8.))
+            .pt(px(8.))
             .bg(bg)
             .children(items.into_iter().enumerate().map(|(index, item)| {
                 let handler = handler.clone();
@@ -163,9 +158,8 @@ impl RenderOnce for TabRail {
                     .flex_none()
                     .items_center()
                     .justify_center()
-                    .h(box_size)
-                    .w(box_width)
-                    .rounded(px(9.))
+                    .size(box_size)
+                    .rounded(px(crate::theme::look::RADIUS_TILE))
                     .when(disabled, |this| this.opacity(0.6))
                     .when(selected, |this| this.bg(indicator))
                     .when(!selected && !disabled, |this| {
