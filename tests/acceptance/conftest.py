@@ -147,6 +147,7 @@ class XMLStore:
         self.errors = []
         self.fail_puts = False
         self.put_budget = None
+        self.on_put = None
 
     def puts(self):
         return [
@@ -196,6 +197,8 @@ def xml_server():
                 status = 403
             if status == 200:
                 if self.command == "PUT":
+                    if store.on_put:
+                        store.on_put(path, body)
                     if store.fail_puts or store.put_budget == 0:
                         status = 503
                     else:
