@@ -38,24 +38,6 @@ def source(path):
     return target.read_text()
 
 
-def rust_test(name, manifest="apps/desktop-gpui/Cargo.toml"):
-    output = run(
-        [
-            "cargo",
-            "test",
-            "--offline",
-            "--manifest-path",
-            manifest,
-            name,
-            "--",
-            "--nocapture",
-        ],
-        timeout=600,
-    )
-    counts = re.findall(r"test result: ok\. (\d+) passed", output)
-    assert sum(map(int, counts)) > 0, f"No Rust test executed for {name}:\n{output}"
-
-
 @pytest.fixture
 def driver():
     command = shlex.split(
@@ -132,6 +114,7 @@ class XMLStore:
         self.requests = []
         self.errors = []
         self.fail_puts = False
+        self.put_budget = None
 
     def puts(self):
         return [
@@ -181,10 +164,12 @@ def xml_server():
                 status = 403
             if status == 200:
                 if self.command == "PUT":
-                    if store.fail_puts:
+                    if store.fail_puts or store.put_budget == 0:
                         status = 503
                     else:
                         store.objects[path] = body
+                        if store.put_budget is not None:
+                            store.put_budget -= 1
                 elif path in store.objects:
                     payload = store.objects[path]
                 else:
@@ -306,19 +291,19 @@ def create_take(root):
         {
             "moves": [
                 {
-                    "activeModifiers": [],
-                    "cursorId": "0",
-                    "timeMs": 250.0,
+                    "active_modifiers": [],
+                    "cursor_id": "0",
+                    "time_ms": 250.0,
                     "x": 0.5,
                     "y": 0.5,
                 }
             ],
             "clicks": [
                 {
-                    "activeModifiers": [],
-                    "cursorId": "0",
-                    "timeMs": 260.0,
-                    "cursorNum": 0,
+                    "active_modifiers": [],
+                    "cursor_id": "0",
+                    "time_ms": 260.0,
+                    "cursor_num": 0,
                     "down": True,
                 }
             ],
@@ -382,3 +367,17 @@ def mirror(driver, xml_server, tmp_path):
         config,
     )
     return invoke
+
+
+def shotlist():
+    return {
+        "shots": [
+            {
+                "shot_id": "intro",
+                "title": "Introduce it",
+                "on_screen": "The product",
+                "lines": ["Ship clearly."],
+                "sentence_ids": ["s1"],
+            }
+        ]
+    }

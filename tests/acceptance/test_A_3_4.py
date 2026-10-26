@@ -1,6 +1,14 @@
-from conftest import rust_test, source
+from conftest import file_snapshot
 
 
-def test_free_mode_preserves_stock_behavior_without_shot_files():
-    source("apps/desktop-gpui/src/shots.rs")
-    rust_test("acceptance_free_mode_writes_no_shots")
+def test_free_mode_writes_no_shot_file_or_take_changes(driver, tmp_path):
+    before = file_snapshot(tmp_path)
+    result = driver(
+        "shots",
+        shotlist=None,
+        take=str(tmp_path),
+        epoch_ms=0,
+        script=[{"at_ms": 1000, "action": "next"}, {"at_ms": 1100, "action": "retake"}],
+    )
+    assert result["mode"] == "free" and result["marks"] == []
+    assert file_snapshot(tmp_path) == before

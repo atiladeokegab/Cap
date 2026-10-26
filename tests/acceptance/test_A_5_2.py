@@ -24,6 +24,18 @@ def test_cap_events_reads_binary_keyboard_and_preserves_segment_times(tmp_path):
     assert by_kind["key"][0]["key_code"] == "KeyA"
     schemas = list((ROOT / "contracts/vendor").glob("*/events*.json"))
     assert schemas, "Vendor the film-owned events schema"
-    from conftest import rust_test
-
-    rust_test("acceptance_events_schema_roundtrip", "Cargo.toml")
+    run(
+        [
+            "uv",
+            "run",
+            "--offline",
+            "--no-project",
+            "--with",
+            "jsonschema",
+            "python",
+            "-c",
+            "import json,sys; from jsonschema import validate; validate(json.load(sys.stdin),json.load(open(sys.argv[1])))",
+            str(schemas[0]),
+        ],
+        input=json.dumps(output),
+    )

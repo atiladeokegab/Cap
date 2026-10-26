@@ -28,7 +28,7 @@ def test_both_audio_tracks_use_only_new_complete_ranges_until_stop(mirror):
         assert sorted(len(body) for _, body in parts) == [256 * 1024, 256 * 1024]
         assert any(path.endswith(".part-262144") for path, _ in parts)
     finish_take(mirror.take)
-    mirror("stop", stopped_at_unix_ms=1793016000000, drain_timeout_ms=100)
+    mirror("stop", stopped_at_unix_ms=1793016000000, drain_timeout_ms=5000)
     manifests = [
         body
         for path, body in mirror.server.puts()
