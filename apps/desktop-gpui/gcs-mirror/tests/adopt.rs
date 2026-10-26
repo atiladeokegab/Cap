@@ -110,3 +110,17 @@ fn the_download_stays_when_app_data_cannot_be_written() {
         VALID
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn the_adopted_config_is_readable_by_its_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let (downloads, appdata) = dirs("mode");
+    fs::write(downloads.join("mirror.json"), VALID).unwrap();
+    let target = appdata.join("mirror.json");
+
+    Config::adopt(&target, &downloads);
+
+    let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "mode {mode:o}");
+}

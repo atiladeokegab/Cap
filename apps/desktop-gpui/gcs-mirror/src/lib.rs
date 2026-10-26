@@ -124,10 +124,12 @@ fn adopt_with(
         .parent()
         .map_or(Ok(()), fs::create_dir_all)
         .and_then(|()| {
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            // It holds a credential: owner-only, whatever the umask.
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            options.open(path)
         })
         .and_then(|mut file| {
             let result = write(&mut file, &bytes);
