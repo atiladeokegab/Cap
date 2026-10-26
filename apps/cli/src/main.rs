@@ -10,6 +10,7 @@ mod confirmation;
 mod credentials;
 mod developers;
 mod doctor;
+mod events;
 mod export;
 mod guide;
 mod jobs;
@@ -195,6 +196,8 @@ enum Commands {
     ExportPreview(ExportPreview),
     /// Inspect or validate a '.cap' project
     Project(ProjectArgs),
+    /// Print every cursor move, click and key press of a '.cap' project as JSON
+    Events(events::EventsArgs),
     /// Start a recording or list available capture targets and devices
     Record(RecordArgs),
     /// Capture a still screenshot of a screen or window
@@ -600,6 +603,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         Commands::ExportPreview(e) => e.run().await,
         Commands::Selftest(args) => args.run(json).await,
         Commands::Project(args) => args.run(json),
+        Commands::Events(args) => args.run(),
         Commands::Record(RecordArgs { command, args }) => match command {
             Some(RecordCommands::Start(args)) => args.run(json).await,
             Some(RecordCommands::Stop(args)) => args.run(json).await,
