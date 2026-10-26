@@ -66,36 +66,47 @@ impl Config {
     }
 
     /// When `path` is missing, moves a downloaded config from `downloads` into
-    /// it: `mirror.json`, else the newest browser-renamed `mirror*.json`. Only
-    /// a file that parses is taken, it is copied then removed so no secret is
-    /// left behind, and an existing `path` is never overwritten. Values are
-    /// never logged.
+    /// it: `mirror.json`, else the newest browser-renamed `mirror*.json`, the
+    /// first of those that parses. It is copied then removed so no secret is
+    /// left behind, and an existing `path` is never overwritten. A failed copy
+    /// leaves no partial `path` and keeps the download. Values are never logged.
     pub fn adopt(path: &Path, downloads: &Path) {
-        if path.exists() {
-            return;
-        }
-        let plain = downloads.join("mirror.json");
-        let found = if plain.is_file() {
-            plain
-        } else {
-            let newest = fs::read_dir(downloads)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter(|entry| {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    name.starts_with("mirror") && name.ends_with(".json")
-                })
-                .max_by_key(|entry| entry.metadata().and_then(|meta| meta.modified()).ok());
-            let Some(entry) = newest else {
-                return;
-            };
-            entry.path()
-        };
-        let Ok(bytes) = fs::read(&found) else {
-            return;
-        };
-        let valid = serde_json::from_slice::<Self>(&bytes).is_ok_and(|config| {
+        adopt_with(path, downloads, |file, bytes| file.write_all(bytes));
+    }
+}
+
+/// [`Config::adopt`] with the write injectable, so a test can fail it.
+fn adopt_with(
+    path: &Path,
+    downloads: &Path,
+    write: impl FnOnce(&mut fs::File, &[u8]) -> io::Result<()>,
+) {
+    if path.exists() {
+        return;
+    }
+    let mut candidates: Vec<(PathBuf, Option<std::time::SystemTime>)> = fs::read_dir(downloads)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.starts_with("mirror") && name.ends_with(".json")
+        })
+        .map(|entry| {
+            let modified = entry.metadata().and_then(|meta| meta.modified()).ok();
+            (entry.path(), modified)
+        })
+        .collect();
+    // Plain `mirror.json` first, then the renamed ones newest first.
+    candidates.sort_by_key(|(found, modified)| {
+        (
+            found.file_name().is_none_or(|name| name != "mirror.json"),
+            std::cmp::Reverse(*modified),
+        )
+    });
+    let Some((found, bytes)) = candidates.into_iter().find_map(|(found, _)| {
+        let bytes = fs::read(&found).ok()?;
+        let valid = serde_json::from_slice::<Config>(&bytes).is_ok_and(|config| {
             !config.bucket.is_empty()
                 && !config.access_key.is_empty()
                 && !config.secret_key.is_empty()
@@ -103,28 +114,39 @@ impl Config {
         if !valid {
             // The parse error can quote a value, so it is not logged.
             tracing::warn!(file = %found.display(), "Downloaded mirror config is invalid (needs bucket, hmac_access_id, hmac_secret); left where it is");
-            return;
+            return None;
         }
-        let written = path
-            .parent()
-            .map_or(Ok(()), fs::create_dir_all)
-            .and_then(|()| {
-                fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(path)
-            })
-            .and_then(|mut file| file.write_all(&bytes));
-        if let Err(error) = written {
-            tracing::warn!(%error, to = %path.display(), "Could not move the downloaded mirror config");
-            return;
-        }
-        if let Err(error) = fs::remove_file(&found) {
-            tracing::warn!(%error, file = %found.display(), "Mirror config copied, but the download could not be removed");
-            return;
-        }
-        tracing::info!(from = %found.display(), to = %path.display(), "Moved the downloaded mirror config into app data");
+        Some((found, bytes))
+    }) else {
+        return;
+    };
+    let written = path
+        .parent()
+        .map_or(Ok(()), fs::create_dir_all)
+        .and_then(|()| {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+        })
+        .and_then(|mut file| {
+            let result = write(&mut file, &bytes);
+            drop(file);
+            if result.is_err() {
+                // A partial file would pass the exists check and keep the mirror off for good.
+                let _ = fs::remove_file(path);
+            }
+            result
+        });
+    if let Err(error) = written {
+        tracing::warn!(%error, to = %path.display(), "Could not move the downloaded mirror config");
+        return;
     }
+    if let Err(error) = fs::remove_file(&found) {
+        tracing::warn!(%error, file = %found.display(), "Mirror config copied, but the download could not be removed");
+        return;
+    }
+    tracing::info!(from = %found.display(), to = %path.display(), "Moved the downloaded mirror config into app data");
 }
 
 #[derive(Debug)]
@@ -745,4 +767,28 @@ fn write_atomic(path: &Path, body: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension("mirror-tmp");
     fs::write(&temporary, body)?;
     fs::rename(&temporary, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_write_leaves_no_partial_config_and_keeps_the_download() {
+        let dir =
+            std::env::temp_dir().join(format!("gcs-mirror-adopt-partial-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let valid = r#"{"bucket":"b","hmac_access_id":"a","hmac_secret":"s"}"#;
+        fs::write(dir.join("mirror.json"), valid).unwrap();
+        let target = dir.join("appdata/mirror.json");
+
+        adopt_with(&target, &dir, |file, bytes| {
+            file.write_all(&bytes[..5])?;
+            Err(io::Error::other("disk full"))
+        });
+
+        assert!(!target.exists(), "a partial config was left in app data");
+        assert_eq!(fs::read_to_string(dir.join("mirror.json")).unwrap(), valid);
+    }
 }
