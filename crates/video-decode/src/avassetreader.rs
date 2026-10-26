@@ -444,8 +444,11 @@ fn reader_start_time(keyframe_index: Option<&Arc<KeyframeIndex>>, requested_time
         .unwrap_or_else(|| cm::Time::with_secs(requested_time as f64, 100))
 }
 
+/// Probe only: samples read by every reader in this process.
+pub static SAMPLES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Probe only: step timings of reader creation on stderr.
-fn probe_step(step: &str, started: std::time::Instant) {
+pub fn probe_step(step: &str, started: std::time::Instant) {
     if std::env::var_os("CAP_PROBE_AVF_TIMING").is_some() {
         eprintln!(
             "avf-step {step} {:.1} ms thread_qos={}",
@@ -756,7 +759,15 @@ impl<'a> Iterator for FramesIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.source {
-            ReaderSource::Native { track_output, .. } => track_output.next_sample_buf().transpose(),
+            ReaderSource::Native { track_output, .. } => {
+                let probe = std::time::Instant::now();
+                let sample = track_output.next_sample_buf().transpose();
+                SAMPLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if probe.elapsed() >= std::time::Duration::from_millis(20) {
+                    probe_step("next_sample_buf", probe);
+                }
+                sample
+            }
             #[cfg(feature = "scripted")]
             ReaderSource::Scripted(reader) => reader.next_sample_buf().map(Ok),
         }

@@ -1060,6 +1060,15 @@ impl Player {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs_f64();
+                #[cfg(target_os = "macos")]
+                if std::env::var_os("CAP_PROBE_AVF_TIMING").is_some() {
+                    eprintln!(
+                        "slow-request {} t={time:.3} seek={seek} ms={ms:.1} samples_so_far={}",
+                        self.label,
+                        cap_video_decode::avassetreader::SAMPLES
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                    );
+                }
                 let _ = writeln!(
                     file,
                     "{} clip{clip} t={time:.3} seek={seek} ms={ms:.1} ok={} end={end:.3} pid={}",

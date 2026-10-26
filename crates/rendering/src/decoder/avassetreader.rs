@@ -944,16 +944,21 @@ impl AVAssetReaderDecoder {
 
             if this.is_none() {
                 if keyframe_index.is_none() {
+                    let probe = std::time::Instant::now();
                     keyframe_index = cap_video_decode::avassetreader::KeyframeIndex::build(&path)
                         .ok()
                         .map(Arc::new);
+                    cap_video_decode::avassetreader::probe_step("render_keyframe_index", probe);
                 }
-                match Self::new(
+                let probe = std::time::Instant::now();
+                let created = Self::new(
                     path.clone(),
                     tokio_handle.clone(),
                     keyframe_index.clone(),
                     requested_time,
-                ) {
+                );
+                cap_video_decode::avassetreader::probe_step("render_reader_new", probe);
+                match created {
                     Ok(decoder) => this = Some(decoder),
                     Err(error) => {
                         tracing::warn!(%error, "Failed to initialize video reader on demand");

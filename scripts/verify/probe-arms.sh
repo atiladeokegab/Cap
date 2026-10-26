@@ -34,6 +34,9 @@ for i in $(seq 5); do one cpu "$i"; done
 kill "${burn[@]}"
 grep -h "avf-step" "$out"/idle-*.log | awk '{s[$2]+=$3; n[$2]++} END {for (k in s) printf "idle %s avg %.1f ms n=%d\n", k, s[k]/n[k], n[k]}'
 grep -h "avf-step" "$out"/cpu-*.log | awk '{s[$2]+=$3; n[$2]++; if ($3>m[$2]) m[$2]=$3} END {for (k in s) printf "cpu %s avg %.1f ms max %.1f n=%d\n", k, s[k]/n[k], m[k], n[k]}'
-grep -h "avf-step" "$out"/cpu-*.log | head -12
+for f in "$out"/cpu-1.log "$out"/idle-1.log; do
+  echo "== $f"
+  grep -E "avf-step|slow-request" "$f" | head -40
+done
 grep -c . "$out"/*.txt
 grep -v "exit=0" "$out/exits.txt" | head -40
