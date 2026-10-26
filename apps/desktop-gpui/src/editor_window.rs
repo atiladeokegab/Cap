@@ -11845,7 +11845,7 @@ impl Render for EditorWindow {
                                             .flex_1()
                                             .min_w_0()
                                             .min_h_0()
-                                            .rounded(px(look::RADIUS_CARD))
+                                            .rounded(px(look::RADIUS_PANEL))
                                             .border_1()
                                             .border_color(self.card_line())
                                             .bg(self.panel_bg())

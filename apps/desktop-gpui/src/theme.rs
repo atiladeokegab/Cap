@@ -6,9 +6,9 @@
 //! `.dark`). The overridden ones are marked below -- they are *not* stock Radix,
 //! so regenerating this from a Radix crate would silently change the palette.
 //!
-//! This fork's dark palettes are the Canvid look instead (zinc and indigo,
-//! `tests/fixtures/canvid-palette.json`), with its sizes in [`look`]; the light
-//! palettes are still Cap's.
+//! This fork's palettes are the Canvid look instead, with its sizes in
+//! [`look`]: light is measured from Canvid's Windows screens (accent #4d66da),
+//! dark is a zinc-and-indigo counterpart (Canvid ships no dark screens).
 
 use std::sync::LazyLock;
 
@@ -21,20 +21,20 @@ use crate::i18n::Locale;
 use crate::platform::{self, ForcedAppearance, MaterialKind};
 use crate::store::AppTheme;
 
-/// The interface face: the platform's own UI font (SF Pro on macOS, Segoe UI
-/// on Windows) so text matches the system. Linux distros have no reliable
-/// equivalent, so they keep the bundled Geist.
-pub const UI_FONT: &str = if cfg!(any(target_os = "macos", target_os = "windows")) {
-    ".SystemUIFont"
-} else {
-    "Geist"
-};
+/// The interface face. Canvid draws in a geometric grotesk (Inter is the
+/// usual stand-in); the bundled Geist is the closest face this app embeds, so
+/// it is used on every platform rather than Segoe UI or SF Pro.
+pub const UI_FONT: &str = "Geist";
 
 /// The Canvid look's sizes: one type scale, spacing step and radius set shared
 /// by the start screen, the capture bar and the editor, so the three windows
 /// read as one product. Colours live on [`Theme`]; a pass from the reference
 /// screenshots should only need to edit values here and there.
 pub mod look {
+    /// The start screen's question (Canvid's 44px heading, scaled to the
+    /// 330px window).
+    pub const HEADING_SIZE: f32 = 17.;
+    pub const HEADING_LINE: f32 = 22.;
     /// Section headings and secondary captions.
     pub const CAPTION_SIZE: f32 = 11.;
     pub const CAPTION_LINE: f32 = 14.;
@@ -51,12 +51,16 @@ pub mod look {
 
     /// Buttons and small controls.
     pub const RADIUS_CONTROL: f32 = 8.;
-    /// Cards: the start screen's targets, the editor's panels.
-    pub const RADIUS_CARD: f32 = 12.;
+    /// The start screen's target cards.
+    pub const RADIUS_CARD: f32 = 16.;
+    /// The editor's floating panels.
+    pub const RADIUS_PANEL: f32 = 14.;
+    /// Short cards and wide buttons: "Take a Screenshot", Camera Only.
+    pub const RADIUS_TILE: f32 = 10.;
 
     /// The start screen's three target cards. Sized so the cards and the
     /// device rows fit the 330x435 main window without scrolling.
-    pub const TARGET_CARD_HEIGHT: f32 = 76.;
+    pub const TARGET_CARD_HEIGHT: f32 = 66.;
     pub const TARGET_ICON: f32 = 24.;
     /// The Display and Window cards' corner chevron.
     pub const TARGET_CHEVRON: f32 = 20.;
@@ -583,22 +587,26 @@ pub struct EditorPalette {
 impl EditorPalette {
     pub fn light() -> Self {
         Self {
-            window: rgb(0xf1f1f3),
-            card: rgb(0xffffff),
-            card_2: rgb(0xf6f6f7),
-            stage: rgb(0xe9e9ec),
-            line: rgba(0x00000013),
-            line_strong: rgba(0x0000001f),
-            text_1: rgb(0x1c1c1e),
-            text_2: rgb(0x6e6e75),
-            text_3: rgb(0xa0a0a8),
-            ctl: rgba(0x0000000b),
-            ctl_hover: rgba(0x00000013),
-            ctl_active: rgba(0x0000001c),
-            accent: rgb(0x007aff),
-            accent_2: rgb(0x2b8cff),
-            playhead: rgb(0xff3b30),
-            thumb: rgb(0xffffff),
+            // The Canvid look: floating #fbfafb panels on the #f3f3f3 window.
+            window: rgb(0xf3f3f3),
+            card: rgb(0xfbfafb),
+            card_2: rgb(0xf0f0f3),
+            stage: rgb(0xededf0),
+            // Solid hairlines and fills, as Canvid draws them: panel border
+            // #d3d4db, segment track #ecebef, rail tile #e5e5ea.
+            line: rgb(0xd3d4db),
+            line_strong: rgb(0xc7c7ce),
+            text_1: rgb(0x1d2024),
+            text_2: rgb(0x6b6e72),
+            // Times and helper text.
+            text_3: rgb(0x8a8c90),
+            ctl: rgb(0xecebef),
+            ctl_hover: rgb(0xe5e5ea),
+            ctl_active: rgb(0xd6d5dd),
+            accent: rgb(0x4d66da),
+            accent_2: rgb(0x6e80da),
+            playhead: rgb(0x4092fd),
+            thumb: rgb(0xfcfcfd),
             seg_tint: 0.13,
             seg_line: 0.34,
             seg_label_base: rgb(0x000000),
@@ -808,28 +816,32 @@ impl Theme {
             material: None,
             editor: EditorPalette::light(),
 
-            gray_1: rgb(0xfcfcfc),
-            gray_2: rgb(0xf9f9f9),
-            gray_3: rgb(0xf0f0f0),
-            gray_4: rgb(0xe8e8e8),
-            gray_5: rgb(0xe0e0e0),
-            gray_6: rgb(0xd9d9d9),
-            gray_7: rgb(0xcecece),
-            gray_8: rgb(0xbbbbbb),
-            gray_9: rgb(0x8d8d8d),
-            gray_10: rgb(0x838383),
-            gray_11: rgb(0x646464),
-            gray_12: rgb(0x202020),
+            // The Canvid look, measured from Canvid's own Windows screens:
+            // window #f3f3f3, card #f8f8f9, control #f0f0f3, hairline #cfcfd6.
+            gray_1: rgb(0xf3f3f3),
+            gray_2: rgb(0xf8f8f9),
+            gray_3: rgb(0xf0f0f3),
+            gray_4: rgb(0xededf0),
+            gray_5: rgb(0xe5e5ea),
+            gray_6: rgb(0xcfcfd6),
+            gray_7: rgb(0xc7c7ce),
+            gray_8: rgb(0xc6c6c9),
+            gray_9: rgb(0x909294),
+            gray_10: rgb(0x6b6e72),
+            gray_11: rgb(0x55575a),
+            gray_12: rgb(0x1d2024),
 
-            blue_3: rgb(0xe6f4fe),
-            blue_4: rgb(0xd5efff),
-            blue_5: rgb(0xc2e5ff),
-            blue_6: rgb(0xacd8fc),
-            blue_8: rgb(0x5eb1ef),
-            blue_9: rgb(0x0090ff),
-            blue_10: rgb(0x0588f0),
-            blue_11: rgb(0x0d74ce),
-            blue_12: rgb(0x113264),
+            // Canvid's accent #4d66da in place of Radix blue; the tints and
+            // shades around it are derived, not measured.
+            blue_3: rgb(0xeef0fb),
+            blue_4: rgb(0xe3e7f9),
+            blue_5: rgb(0xd5dbf6),
+            blue_6: rgb(0xc3cbf2),
+            blue_8: rgb(0x8d9de8),
+            blue_9: rgb(0x4d66da),
+            blue_10: rgb(0x4359c4),
+            blue_11: rgb(0x3a4fb8),
+            blue_12: rgb(0x1f2a66),
 
             red_2: rgb(0xfff7f7),
             red_3: rgb(0xfeebec),
@@ -842,8 +854,8 @@ impl Theme {
             amber_6: rgb(0xf3d673),
             amber_11: rgb(0xab6400),
 
-            blue_100: rgb(0xadc9ff),
-            blue_500: rgb(0x3666c5),
+            blue_100: rgb(0xc3cbf2),
+            blue_500: rgb(0x4d66da),
             red_300: rgb(0xff4766),
 
             // `theme.css:38-44`.
@@ -853,7 +865,7 @@ impl Theme {
             gray_400_legacy: rgb(0x868e9f),
             gray_500_legacy: rgb(0x161b26),
 
-            text_primary: rgba(0x12161ff2),
+            text_primary: rgba(0x1d2024f2),
         }
     }
 
@@ -863,9 +875,9 @@ impl Theme {
             material: None,
             editor: EditorPalette::dark(),
 
-            // The Canvid look (tests/fixtures/canvid-palette.json): zinc
-            // surfaces, indigo accent, crimson record. gray 5 and 9 sit between
-            // their neighbours; the fixture does not pin them.
+            // The Canvid look's dark counterpart: zinc surfaces, indigo
+            // accent, crimson record. gray 5 and 9 sit between their
+            // neighbours.
             gray_1: rgb(0x09090b),
             gray_2: rgb(0x121215),
             gray_3: rgb(0x1c1c20),

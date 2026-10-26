@@ -237,9 +237,9 @@ fn shadow(color: Hsla, y: f32, blur: f32, spread: f32, inset: bool) -> gpui::Box
 /// unblurred, keep it cheap on a window that repaints with the mic meter.
 fn glass_button<E: Styled>(element: E, theme: Theme, selected: bool) -> E {
     let dark = theme.is_dark();
-    // The Canvid look: flat zinc cards with a hairline, an indigo ring when
-    // selected. No gradient or inner highlight on the dark surfaces.
-    if dark && theme.material.is_none() {
+    // The Canvid look: flat cards with a hairline, an accent ring when
+    // selected. The gradient and inner highlight stay for macOS glass only.
+    if theme.material.is_none() {
         return element
             .bg(if selected {
                 Theme::with_alpha(theme.blue_9, 0.14)
@@ -293,8 +293,20 @@ fn glass_button<E: Styled>(element: E, theme: Theme, selected: bool) -> E {
 fn capture_hover_fill(theme: Theme, selected: bool) -> Hsla {
     if selected {
         Theme::with_alpha(theme.blue_9, 0.06)
+    } else if !theme.is_dark() && theme.material.is_none() {
+        // Canvid's light cards turn white under the pointer.
+        gpui::white()
     } else {
         glass_tint(theme, 0.04, 0.05)
+    }
+}
+
+/// Camera Only is a short tile beside "Take a Screenshot"; the rest are cards.
+fn target_radius(target: TargetType) -> f32 {
+    if target == TargetType::CameraOnly {
+        look::RADIUS_TILE
+    } else {
+        look::RADIUS_CARD
     }
 }
 
@@ -6471,7 +6483,17 @@ impl MainWindow {
             .gap(px(look::SPACE_2))
             .w_full()
             .flex_shrink_0()
-            .child(self.render_section_heading(tr::main::target::heading()))
+            // Canvid's start screen leads with one large, light question.
+            .child(
+                div()
+                    .w_full()
+                    .text_center()
+                    .text_size(px(look::HEADING_SIZE))
+                    .line_height(px(look::HEADING_LINE))
+                    .font_weight(FontWeight::NORMAL)
+                    .text_color(self.theme.gray_12)
+                    .child(tr::main::target::heading()),
+            )
             .child(
                 div()
                     .flex()
@@ -6585,7 +6607,7 @@ impl MainWindow {
                 look::TARGET_CARD_HEIGHT
             }))
             .overflow_hidden()
-            .rounded(px(look::RADIUS_CARD))
+            .rounded(px(target_radius(target)))
             .map(|this| glass_button(this, theme, selected))
             .child(self.target_button_inner(target, cx))
     }
@@ -6623,7 +6645,7 @@ impl MainWindow {
             .aria_selected(selected)
             .flex()
             .size_full()
-            .rounded(px(look::RADIUS_CARD - 1.))
+            .rounded(px(target_radius(target) - 1.))
             .hover(move |style| style.bg(capture_hover_fill(theme, selected)))
             .active(move |style| style.bg(capture_press_fill(theme, selected)))
             .on_click(cx.listener(move |this, _, _window, cx| {
@@ -6673,7 +6695,7 @@ impl MainWindow {
             .flex_1()
             .h(px(look::SECONDARY_CARD_HEIGHT))
             .overflow_hidden()
-            .rounded(px(look::RADIUS_CARD))
+            .rounded(px(look::RADIUS_TILE))
             .map(|this| glass_button(this, theme, false))
             .child(
                 div()
@@ -6687,7 +6709,7 @@ impl MainWindow {
                     .items_center()
                     .justify_center()
                     .gap(px(look::SPACE_2))
-                    .rounded(px(look::RADIUS_CARD - 1.))
+                    .rounded(px(look::RADIUS_TILE - 1.))
                     .hover(move |style| style.bg(capture_hover_fill(theme, false)))
                     .active(move |style| style.bg(capture_press_fill(theme, false)))
                     .child(

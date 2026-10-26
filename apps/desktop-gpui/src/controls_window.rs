@@ -557,7 +557,7 @@ impl Render for ControlsWindow {
                         .items_start()
                         .gap(px(look::SPACE_2))
                         .mb(px(look::SPACE_2))
-                        .rounded(px(look::RADIUS_CARD))
+                        .rounded(px(look::RADIUS_TILE))
                         .border_1()
                         .border_color(Theme::with_alpha(self.theme.red_9, 0.4))
                         .bg(self.theme.gray_2)
