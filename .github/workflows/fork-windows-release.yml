@@ -8,8 +8,6 @@ name: "fork-windows-release"
 
 on:
   workflow_dispatch:
-  # fork-look-screenshots.yml installs this installer to screenshot the look.
-  workflow_call:
   push:
     tags:
       - "v*"

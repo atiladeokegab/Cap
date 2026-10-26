@@ -1,37 +1,49 @@
 name: "fork-look-screenshots"
 
 # A-6.2: screenshots of the reference design on Windows, for an independent visual
-# review against the reference screens. Builds the same unsigned installer as
-# fork-windows-release.yml, installs it on a clean windows-2022 runner, and
-# captures three views: the start screen, the bottom capture bar on the display
-# overlay, and the editor (with its left rail) that a short Studio recording opens.
-# Uploads them as the "look-screenshots" artifact. Judging is not done here.
+# review against the reference screens. Installs the unsigned installer from a
+# fork-windows-release run on a clean windows-2022 runner, and captures three
+# views: the start screen, the bottom capture bar on the display overlay, and
+# the editor (with its left rail) that a short Studio recording opens. Uploads
+# them as the "look-screenshots" artifact. Judging is not done here.
+#
+# Dispatch fork-windows-release on the same ref first; this takes its latest
+# successful run there unless installer_run names one.
 
 on:
   workflow_dispatch:
+    inputs:
+      installer_run:
+        description: "fork-windows-release run id (default: latest successful run on this ref)"
+        required: false
+        default: ""
 
-# The called release workflow asks for contents: write; a caller cannot grant
-# less than its callee requests.
+# Reads another run's artifact; never writes, so it can never publish a release.
 permissions:
-  contents: write
+  contents: read
+  actions: read
 
 jobs:
-  installer:
-    # The called workflow publishes a GitHub release when the ref is a v* tag;
-    # screenshots must never do that, so a tag dispatch is refused here.
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-    uses: ./.github/workflows/fork-windows-release.yml
-
   screenshots:
-    needs: installer
+    # Screenshots belong to branches, never to release tags.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
       - name: Download the installer
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cap-windows-x64-unsigned
-          path: installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALLER_RUN: ${{ inputs.installer_run }}
+        run: |
+          $run = $env:INSTALLER_RUN
+          if (-not $run) {
+            $run = gh run list -R $env:GITHUB_REPOSITORY --workflow fork-windows-release.yml --branch $env:GITHUB_REF_NAME --status success --limit 1 --json databaseId --jq '.[0].databaseId'
+          }
+          if (-not $run) { throw "No successful fork-windows-release run on $env:GITHUB_REF_NAME; dispatch it first." }
+          "Installer from fork-windows-release run $run" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          gh run download $run -R $env:GITHUB_REPOSITORY -n cap-windows-x64-unsigned -D installer
+          if ($LASTEXITCODE -ne 0) { throw "gh run download failed" }
 
       - name: Set a 1920x1080 desktop
         shell: pwsh
