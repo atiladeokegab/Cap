@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "film/contracts/cap-events.schema.json",
+  "title": "cap-events",
+  "description": "Raw input from `cap events <take> --json`: every move, click and key per segment, from cursor.json and keyboard.bin. Times are milliseconds on the segment's start-gate clock, as Cap writes them (f64).",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": [
+      "type",
+      "segment",
+      "time_ms"
+    ],
+    "properties": {
+      "id": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]*$"
+      },
+      "type": {
+        "enum": [
+          "move",
+          "click",
+          "key"
+        ]
+      },
+      "segment": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "time_ms": {
+        "type": "number",
+        "minimum": 0
+      },
+      "x": {
+        "type": "number"
+      },
+      "y": {
+        "type": "number"
+      },
+      "down": {
+        "type": "boolean"
+      },
+      "cursor_id": {
+        "type": "string"
+      },
+      "key": {
+        "type": "string"
+      }
+    }
+  }
+}
