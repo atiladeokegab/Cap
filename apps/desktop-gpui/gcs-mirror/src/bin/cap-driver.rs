@@ -1,6 +1,6 @@
 //! Test-only adapter for tests/acceptance: one JSON request on stdin
-//! (`op`: sign, scan, stop, resume, shots, prompter or zoom), one JSON object
-//! on stdout.
+//! (`op`: sign, scan, stop, resume, shots, prompter, zoom or windows), one JSON
+//! object on stdout.
 
 // The teleprompter's shot logic, std and serde only, straight from the app.
 #[allow(dead_code)]
@@ -11,6 +11,10 @@ mod shots;
 #[allow(dead_code)]
 #[path = "../../../src/natural_zoom.rs"]
 mod natural_zoom;
+
+// The window log's change detector and epoch arithmetic, std and serde only, straight from the app.
+#[path = "../../../src/window_log/change.rs"]
+mod window_change;
 
 use cap_gcs_mirror::{Config, Mirror, sigv4};
 use serde_json::{Value, json};
@@ -44,6 +48,29 @@ fn sign(request: &Value) -> Result<Value, String> {
         sigv4::authorize(&key, text(request, "method"), &url, &headers, &payload)?;
     headers.insert("authorization".into(), authorization);
     Ok(json!({ "signature": signature, "headers": headers }))
+}
+
+/// Window samples at `at_ms` (unix ms) through the app's change detector, timed from the
+/// start-gate `epoch_ms`; returns the windows.jsonl lines the app would write.
+fn windows(request: &Value) -> Result<Value, String> {
+    let base = Instant::now();
+    let at = |ms: &Value| base + Duration::from_millis(ms.as_u64().unwrap_or_default());
+    let epoch = at(&request["epoch_ms"]);
+    let segment = request["segment"].as_u64().unwrap_or_default() as u32;
+    let mut detector = window_change::ChangeDetector::default();
+    let mut lines = Vec::new();
+    for sample in request["samples"].as_array().ok_or("samples")? {
+        let window = sample["title"]
+            .is_string()
+            .then(|| window_change::Foreground {
+                title: text(sample, "title").into(),
+                process: text(sample, "process").into(),
+                bounds: [0; 4],
+            });
+        let time_ms = window_change::time_ms(epoch, at(&sample["at_ms"]));
+        lines.extend(detector.observe(segment, time_ms, window));
+    }
+    Ok(json!({ "lines": lines }))
 }
 
 fn mirror(request: &Value) -> Result<Option<Mirror>, String> {
@@ -421,6 +448,9 @@ fn fetch_shotlist(request: &Value, url: &str) -> Result<Vec<u8>, String> {
 fn run(request: &Value) -> Result<Value, String> {
     if request["op"] == "sign" {
         return sign(request);
+    }
+    if request["op"] == "windows" {
+        return windows(request);
     }
     if request["op"] == "shots" {
         return shots_op(request);
