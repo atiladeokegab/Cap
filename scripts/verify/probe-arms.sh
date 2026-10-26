@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Probe only: loop the vfr-holds playback case idle, under pure CPU load and
+# under VideoToolbox load (7 more copies of the case), recording every request
+# of 100 ms or more. Usage: probe-arms.sh <out dir>
+set -uo pipefail
+out=$1
+mkdir -p "$out"
+eval "$(python3 scripts/verify/plan.py env --tier fast --platform macos --suites playback)"
+export CAP_VERIFY_TIER=fast
+bin=$(cargo test --profile ci-verify -p cap-verify --test playback --no-run --message-format=json 2>/dev/null |
+  python3 -c 'import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "playback":
+        print(m["executable"])')
+echo "binary: $bin"
+[[ -x $bin ]] || exit 2
+case_glob='playback/vfr-holds/full/seq60-from30/*'
+one() { # <label> <iteration>
+  CAP_VERIFY_CASE=$case_glob CAP_VERIFY_LATENCY_FILE="$out/$1.txt" CAP_VERIFY_LATENCY_MIN_MS=100 \
+    "$bin" play_from_middle --exact --test-threads=1 >"$out/$1-$2.log" 2>&1
+  echo "$1 $2 exit=$?" >>"$out/exits.txt"
+}
+# Fixture generation, once.
+one warmup 0
+for i in $(seq 20); do one idle "$i"; done
+burn=()
+for _ in $(seq 12); do yes >/dev/null & burn+=($!); done
+for i in $(seq 20); do one cpu "$i"; done
+kill "${burn[@]}"
+for i in $(seq 20); do
+  for k in 1 2 3 4 5 6 7; do one vtload "$i.$k" & done
+  one vt "$i"
+  wait
+done
+grep -c . "$out"/*.txt
+grep -v "exit=0" "$out/exits.txt" | head -40
