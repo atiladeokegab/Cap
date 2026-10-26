@@ -31,6 +31,8 @@ pub struct InputEvent {
     cursor_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_code: Option<String>,
 }
 
 impl InputEvent {
@@ -45,6 +47,7 @@ impl InputEvent {
             down: None,
             cursor_id: None,
             key: None,
+            key_code: None,
         }
     }
 }
@@ -76,7 +79,8 @@ pub fn take_events(take: &Path) -> Result<Vec<InputEvent>, String> {
     for (segment, dir) in segment_dirs(take)? {
         let cursor = dir.join("cursor.json");
         if cursor.is_file() {
-            let cursor = CursorEvents::load_from_file(&cursor)?;
+            let cursor = CursorEvents::load_from_file(&cursor)
+                .map_err(|e| format!("segment {segment}: {e}"))?;
             events.extend(cursor.moves.into_iter().map(|m| InputEvent {
                 x: Some(m.x),
                 y: Some(m.y),
@@ -92,12 +96,14 @@ pub fn take_events(take: &Path) -> Result<Vec<InputEvent>, String> {
         let keyboard = dir.join(cap_project::KEYBOARD_EVENTS_FILE_NAME);
         if keyboard.is_file() {
             events.extend(
-                KeyboardEvents::load_from_file(&keyboard)?
+                KeyboardEvents::load_from_file(&keyboard)
+                    .map_err(|e| format!("segment {segment}: {e}"))?
                     .presses
                     .into_iter()
                     .map(|k| InputEvent {
                         down: Some(k.down),
                         key: Some(k.key),
+                        key_code: Some(k.key_code),
                         ..InputEvent::new("key", segment, k.time_ms)
                     }),
             );
@@ -168,6 +174,7 @@ mod tests {
             ]
         );
         assert_eq!(events[2].key.as_deref(), Some("a"));
+        assert_eq!(events[2].key_code.as_deref(), Some("KeyA"));
         let json = serde_json::to_value(&events[1]).unwrap();
         assert_eq!(
             json,

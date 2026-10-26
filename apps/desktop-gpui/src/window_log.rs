@@ -5,8 +5,8 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -88,15 +88,64 @@ pub fn spawn(
     WindowLog { stop }
 }
 
+/// The studio take being logged: its folder, its current segment and, unless paused, that segment's log.
+struct Current {
+    take: PathBuf,
+    segment: u32,
+    log: Option<WindowLog>,
+}
+
+static CURRENT: Mutex<Option<Current>> = Mutex::new(None);
+
+/// Segment 0 of a studio take; `epoch` is as for [`spawn`].
+pub fn start(take: &Path, epoch: impl Fn() -> Option<Instant> + Send + 'static) {
+    let log = spawn(take, 0, epoch);
+    *lock() = Some(Current {
+        take: take.to_path_buf(),
+        segment: 0,
+        log: Some(log),
+    });
+}
+
+/// Pause ends the segment's log; resume starts the next segment, timed from now.
+// shortcut: the resume is seen when the actor acknowledges it, a little after the new segment's
+// epoch, so its first titles read slightly late.
+pub fn set_paused(paused: bool) {
+    let mut current = lock();
+    let Some(current) = current.as_mut() else {
+        return;
+    };
+    if paused {
+        current.log = None;
+    } else if current.log.is_none() {
+        current.segment += 1;
+        let at = Instant::now();
+        current.log = Some(spawn(&current.take, current.segment, move || Some(at)));
+    }
+}
+
+/// Stop or cancel: no more lines for this take.
+pub fn stop() {
+    *lock() = None;
+}
+
+fn lock() -> std::sync::MutexGuard<'static, Option<Current>> {
+    CURRENT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn poll(path: PathBuf, segment: u32, epoch: impl Fn() -> Option<Instant>, stop: Arc<AtomicBool>) {
     let mut detector = ChangeDetector::default();
     while !stop.load(Ordering::Relaxed) {
         if let Some(epoch) = epoch() {
             let time_ms = Instant::now().saturating_duration_since(epoch).as_millis() as u64;
-            if let Some(line) = detector.observe(segment, time_ms, foreground()) {
-                if let Err(e) = append(&path, &line) {
-                    tracing::warn!("window log write failed: {e}");
-                }
+            let line = detector.observe(segment, time_ms, foreground());
+            // A segment that ended mid-poll writes nothing more, so segments never interleave.
+            if let Some(line) = line.filter(|_| !stop.load(Ordering::Relaxed))
+                && let Err(e) = append(&path, &line)
+            {
+                tracing::warn!("window log write failed: {e}");
             }
         }
         std::thread::sleep(POLL);
@@ -228,5 +277,26 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         drop(spawn(tmp.path(), 0, || Some(Instant::now())));
         assert!(cfg!(windows) || !tmp.path().join(WINDOWS_LOG_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn pause_ends_the_segment_and_resume_starts_the_next() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = || {
+            lock()
+                .as_ref()
+                .map(|current| (current.segment, current.log.is_some()))
+        };
+        start(tmp.path(), || None);
+        assert_eq!(state(), Some((0, true)));
+        set_paused(true);
+        assert_eq!(state(), Some((0, false)));
+        set_paused(false);
+        set_paused(false);
+        assert_eq!(state(), Some((1, true)));
+        stop();
+        assert_eq!(state(), None);
+        set_paused(false);
+        assert_eq!(state(), None);
     }
 }
