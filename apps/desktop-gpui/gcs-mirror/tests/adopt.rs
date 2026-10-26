@@ -77,3 +77,36 @@ fn an_existing_app_data_config_leaves_downloads_untouched() {
         VALID
     );
 }
+
+#[test]
+fn an_invalid_plain_download_does_not_mask_a_valid_renamed_one() {
+    let (downloads, appdata) = dirs("masked");
+    let partial = r#"{"bucket":"b"}"#;
+    fs::write(downloads.join("mirror.json"), partial).unwrap();
+    fs::write(downloads.join("mirror (1).json"), VALID).unwrap();
+    let target = appdata.join("mirror.json");
+
+    Config::adopt(&target, &downloads);
+
+    assert_eq!(fs::read_to_string(&target).unwrap(), VALID);
+    assert!(!downloads.join("mirror (1).json").exists());
+    assert_eq!(
+        fs::read_to_string(downloads.join("mirror.json")).unwrap(),
+        partial
+    );
+}
+
+#[test]
+fn the_download_stays_when_app_data_cannot_be_written() {
+    let (downloads, appdata) = dirs("unwritable");
+    // App data's parent is a file, so the folder cannot be made.
+    fs::write(&appdata, "not a folder").unwrap();
+    fs::write(downloads.join("mirror.json"), VALID).unwrap();
+
+    Config::adopt(&appdata.join("mirror.json"), &downloads);
+
+    assert_eq!(
+        fs::read_to_string(downloads.join("mirror.json")).unwrap(),
+        VALID
+    );
+}
