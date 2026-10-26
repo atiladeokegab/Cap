@@ -847,31 +847,34 @@ impl ActiveRecording {
     /// spawn it on tokio without borrowing itself.
     pub fn pause_handle(
         &self,
-    ) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+    ) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<Option<std::time::Instant>>> + Send>>
+    {
         match &self.handle {
             Handle::Studio(handle) => {
                 let handle = handle.clone();
-                Box::pin(async move { handle.pause().await })
+                Box::pin(async move { handle.pause().await.map(|()| None) })
             }
             Handle::Instant(handle) => {
                 let handle = handle.clone();
-                Box::pin(async move { handle.pause().await })
+                Box::pin(async move { handle.pause().await.map(|()| None) })
             }
         }
     }
 
-    /// Owned resume future; see [`Self::pause_handle`].
+    /// Owned resume future; see [`Self::pause_handle`]. A studio resume
+    /// yields the epoch its actor reports for the new segment.
     pub fn resume_handle(
         &self,
-    ) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+    ) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<Option<std::time::Instant>>> + Send>>
+    {
         match &self.handle {
             Handle::Studio(handle) => {
                 let handle = handle.clone();
-                Box::pin(async move { handle.resume().await })
+                Box::pin(async move { handle.resume_at().await.map(Some) })
             }
             Handle::Instant(handle) => {
                 let handle = handle.clone();
-                Box::pin(async move { handle.resume().await })
+                Box::pin(async move { handle.resume().await.map(|()| None) })
             }
         }
     }
@@ -897,6 +900,7 @@ impl ActiveRecording {
         progress: Option<StudioFinalizationPublisher>,
         camera_snapshot: Option<StudioCameraSnapshot>,
     ) -> Option<CaptureStopFuture> {
+        crate::window_log::stop(&self.project_dir);
         let Handle::Studio(handle) = &self.handle else {
             return None;
         };
@@ -923,6 +927,7 @@ impl ActiveRecording {
         progress: Option<StudioFinalizationPublisher>,
         camera_snapshot: Option<StudioCameraSnapshot>,
     ) -> Option<CaptureStopFuture> {
+        crate::window_log::stop(&self.project_dir);
         let Handle::Studio(handle) = &self.handle else {
             return None;
         };
@@ -954,6 +959,7 @@ impl ActiveRecording {
 
     #[cfg(any(target_os = "macos", windows))]
     pub fn studio_delete_handle(&self) -> Option<CaptureStopFuture> {
+        crate::window_log::stop(&self.project_dir);
         let Handle::Studio(handle) = &self.handle else {
             return None;
         };
@@ -997,6 +1003,7 @@ impl ActiveRecording {
         preserve_local: bool,
         failed: bool,
     ) -> Option<CaptureStopFuture> {
+        crate::window_log::stop(&self.project_dir);
         let lifecycle = self.instant_lifecycle()?;
         let active = self.clone();
         let cancel = active.instant_cancellation();
@@ -1032,6 +1039,7 @@ impl ActiveRecording {
 
     #[cfg(target_os = "linux")]
     pub fn instant_delete_handle(&self) -> Option<CaptureStopFuture> {
+        crate::window_log::stop(&self.project_dir);
         let lifecycle = self.instant_lifecycle()?;
         let active = self.clone();
         let directory = self.project_dir.clone();
@@ -1050,6 +1058,7 @@ impl ActiveRecording {
 
     #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn failed_stop_handle(&self) -> CaptureStopFuture {
+        crate::window_log::stop(&self.project_dir);
         let stop: futures_util::future::BoxFuture<'static, anyhow::Result<()>> = match &self.handle
         {
             Handle::Studio(handle) => {
@@ -1099,6 +1108,7 @@ impl ActiveRecording {
 
     #[cfg(target_os = "linux")]
     pub(crate) async fn cancel_preserving(self) -> anyhow::Result<()> {
+        crate::window_log::stop(&self.project_dir);
         if let Some(gate) = &self.start_gate {
             gate.arm();
         }
@@ -1134,6 +1144,7 @@ impl ActiveRecording {
     /// delete and restart flows. Deleting a directory this app just created is
     /// app behavior, same as the Tauri delete button.
     pub async fn cancel_and_delete(self) -> anyhow::Result<()> {
+        crate::window_log::stop(&self.project_dir);
         self.cancel_and_delete_with_query(None, false).await
     }
 
@@ -1141,6 +1152,7 @@ impl ActiveRecording {
     /// telling the server why its Instant video is deleted. On Linux a start
     /// that wrote media by the time capture stopped keeps it, as after a crash.
     pub(crate) async fn discard_cancelled_start(self) -> anyhow::Result<()> {
+        crate::window_log::stop(&self.project_dir);
         #[cfg(target_os = "linux")]
         if !matches!(self.handle, Handle::Instant(_)) {
             return self.cancel_preserving().await;
@@ -1160,6 +1172,7 @@ impl ActiveRecording {
         query: Option<String>,
         keep_media: bool,
     ) -> anyhow::Result<()> {
+        crate::window_log::stop(&self.project_dir);
         if let Some(gate) = &self.start_gate {
             gate.arm();
         }
@@ -1258,6 +1271,7 @@ impl ActiveRecording {
         preserve_local: bool,
         camera_snapshot: Option<StudioCameraSnapshot>,
     ) -> anyhow::Result<PathBuf> {
+        crate::window_log::stop(&self.project_dir);
         #[cfg(target_os = "linux")]
         let _operation = self.instant_operation.lock().await;
         let mut upload_guard = match self.instant_upload.as_ref() {
@@ -2604,6 +2618,12 @@ async fn start_attempt_with_upload(
         }
     };
 
+    if matches!(handle, Handle::Studio(_)) {
+        let gate = config.start_gate.clone();
+        crate::window_log::start(&project_dir, move || {
+            gate.as_ref()?.armed_at().map(|armed| armed.instant())
+        });
+    }
     #[cfg(target_os = "linux")]
     let instant_completion = instant_upload
         .as_ref()

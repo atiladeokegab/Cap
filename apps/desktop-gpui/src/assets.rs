@@ -28,6 +28,14 @@ macro_rules! assets {
 /// let this app render a weight the original cannot, which is how the two
 /// drift apart.
 const FONTS: &[(&str, &[u8])] = assets!("fonts":
+    // The reference design's face: rsms/inter 4.1, SIL OFL 1.1, licence in
+    // `assets/fonts/Inter-LICENSE.txt`. SemiBold is embedded because the reference design's
+    // labels and Export button draw at 600.
+    "Inter-Regular.ttf",
+    "Inter-Medium.ttf",
+    "Inter-SemiBold.ttf",
+    "Inter-Bold.ttf",
+    // Geist draws the caption presets' generic stacks (`editor_panels`).
     "Geist.ttf",
     "Geist-Medium.ttf",
     "Geist-Bold.ttf",

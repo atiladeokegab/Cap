@@ -1,0 +1,120 @@
+name: "fork-look-screenshots"
+
+# A-6.2: screenshots of the reference design on Windows, for an independent visual
+# review against the reference screens. Installs the unsigned installer from a
+# fork-windows-release run on a clean windows-2022 runner, and captures three
+# views: the start screen, the bottom capture bar on the display overlay, and
+# the editor (with its left rail) that a short Studio recording opens. Uploads
+# them as the "look-screenshots" artifact. Judging is not done here.
+#
+# Dispatch fork-windows-release on the same ref first; this takes its latest
+# successful run there unless installer_run names one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      installer_run:
+        description: "fork-windows-release run id (default: latest successful run on this ref)"
+        required: false
+        default: ""
+
+# Reads another run's artifact; never writes, so it can never publish a release.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  screenshots:
+    # Screenshots belong to branches, never to release tags.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Download the installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALLER_RUN: ${{ inputs.installer_run }}
+        run: |
+          $run = $env:INSTALLER_RUN
+          if (-not $run) {
+            $run = gh run list -R $env:GITHUB_REPOSITORY --workflow fork-windows-release.yml --branch $env:GITHUB_REF_NAME --status success --limit 1 --json databaseId --jq '.[0].databaseId'
+          }
+          if (-not $run) { throw "No successful fork-windows-release run on $env:GITHUB_REF_NAME; dispatch it first." }
+          "Installer from fork-windows-release run $run" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          gh run download $run -R $env:GITHUB_REPOSITORY -n cap-windows-x64-unsigned -D installer
+          if ($LASTEXITCODE -ne 0) { throw "gh run download failed" }
+
+      - name: Set a 1920x1080 desktop
+        shell: pwsh
+        run: |
+          # The runner's desktop starts at 1024x768, smaller than the main window.
+          try { Set-DisplayResolution -Width 1920 -Height 1080 -Force } catch { Write-Warning "Set-DisplayResolution: $_" }
+          Add-Type -AssemblyName System.Windows.Forms
+          "Desktop: $([System.Windows.Forms.Screen]::PrimaryScreen.Bounds)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+
+      - name: Install Cap silently
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem installer -Filter *.exe | Select-Object -First 1
+          Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait
+          $exe = Get-ChildItem "$env:LOCALAPPDATA", "$env:ProgramFiles" -Recurse -Filter Cap.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw "Cap.exe not found after install" }
+          "CAP_EXE=$($exe.FullName)" | Add-Content $env:GITHUB_ENV
+
+      - name: Seed settings (light theme, onboarding done, editor after recording)
+        shell: pwsh
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP "cap-data"
+          New-Item -ItemType Directory -Force -Path $data, (Join-Path $env:RUNNER_TEMP "shots") | Out-Null
+          '{"general_settings":{"theme":"light","hasCompletedStartup":true,"hasCompletedOnboarding":true,"postStudioRecordingBehaviour":"openEditor"},"recording_start_safety":{"confirmBeforeRecordingWithoutMicrophone":false}}' |
+            Set-Content -Encoding utf8NoBOM (Join-Path $data "store")
+          "CAP_GPUI_APP_DATA_DIR=$data" | Add-Content $env:GITHUB_ENV
+          "CAP_GPUI_RECORDINGS_DIR=$(Join-Path $data 'recordings')" | Add-Content $env:GITHUB_ENV
+          "SHOTS=$(Join-Path $env:RUNNER_TEMP 'shots')" | Add-Content $env:GITHUB_ENV
+
+      - name: Capture the three views
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Shot($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            $bitmap.Save((Join-Path $env:SHOTS "$name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+            "captured $name.png"
+          }
+          function Stop-Cap { Get-Process Cap -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep 3 }
+
+          # 1. The start screen: a plain launch shows the main window.
+          $env:CAP_GPUI_NO_TRAY = "1"
+          Start-Process -FilePath $env:CAP_EXE
+          Start-Sleep 20
+          Shot "start-screen"
+          Stop-Cap
+
+          # 2. The bottom capture bar: the display overlay, left up.
+          $env:CAP_GPUI_AUTO_OVERLAY = "display"
+          Start-Process -FilePath $env:CAP_EXE
+          Start-Sleep 15
+          Shot "bottom-bar"
+          Stop-Cap
+          Remove-Item Env:CAP_GPUI_AUTO_OVERLAY
+
+          # 3. The editor's left rail, opened by a short studio recording.
+          $env:CAP_GPUI_AUTO_RECORD = "studio:12"
+          $env:CAP_GPUI_AUTO_NO_MIC = "1"
+          Start-Process -FilePath $env:CAP_EXE
+          Start-Sleep 60
+          Shot "editor-left-rail"
+          Stop-Cap
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: look-screenshots
+          path: ${{ runner.temp }}/shots/*.png
+          if-no-files-found: error

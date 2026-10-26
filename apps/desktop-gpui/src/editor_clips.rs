@@ -741,11 +741,13 @@ impl EditorWindow {
     // -- The sidebar ------------------------------------------------------------
 
     /// The whole clips column, drawn in the config sidebar's slot while the
-    /// mode is open. Same `ml-2 w-104` wrapper the config sidebar carries, and
+    /// mode is open. Same width as the config sidebar, rail included, and
     /// the same card.
     pub(crate) fn render_clips_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .w(px(crate::editor_window::SIDEBAR_WIDTH))
+            .w(px(
+                crate::editor_window::SIDEBAR_WIDTH + crate::editor_window::SIDEBAR_RAIL_WIDTH
+            ))
             .flex_none()
             .flex()
             .min_h_0()
@@ -756,7 +758,7 @@ impl EditorWindow {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .rounded(px(12.))
+                    .rounded(px(crate::theme::look::RADIUS_PANEL))
                     .border_1()
                     .border_color(self.card_line())
                     .bg(self.panel_bg())

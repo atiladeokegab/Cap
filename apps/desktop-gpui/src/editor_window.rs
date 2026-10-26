@@ -67,7 +67,7 @@ use gpui::{
     div, point, prelude::FluentBuilder, px, svg,
 };
 
-use crate::theme::LocaleFont as _;
+use crate::theme::{LocaleFont as _, look};
 use crate::{
     editor_audio::{AudioImportRequest, probe_audio_duration, replace_audio_asset},
     editor_edits::{self as edits, DragBounds, Hit, ProjectHistory, SPLIT_SNAP_PX, Selection},
@@ -173,8 +173,11 @@ const HEADER_HEIGHT: f32 = 52.;
 /// arbitrary spacing: 104 x 0.25rem = 26rem = 416px. The column also carries
 /// `ml-2`, i.e. an 8px gutter.
 pub(crate) const SIDEBAR_WIDTH: f32 = 416.;
-/// The sidebar's tab rail.
+/// The clips sidebar's back header.
 pub(crate) const SIDEBAR_TAB_BAR_HEIGHT: f32 = 46.;
+/// The reference design's vertical icon rail, inside the sidebar card left of the
+/// `SIDEBAR_WIDTH` content column.
+pub(crate) const SIDEBAR_RAIL_WIDTH: f32 = 60.;
 
 /// `padding = 4` inside `PreviewCanvas` (`Player.tsx:566`).
 const PLAYER_CANVAS_PADDING: f32 = 4.;
@@ -240,7 +243,7 @@ fn compact_header_controls(viewport_width: f32, windows: bool, captions: bool) -
 }
 
 fn editor_player_width(viewport_width: f32) -> f32 {
-    (viewport_width - SIDEBAR_WIDTH - 8. - 16. - 2.).max(0.)
+    (viewport_width - SIDEBAR_WIDTH - SIDEBAR_RAIL_WIDTH - 8. - 16. - 2.).max(0.)
 }
 
 // ---------------------------------------------------------------------------
@@ -8484,7 +8487,7 @@ impl EditorWindow {
                         svg()
                             .path("icons/settings.svg")
                             .size(px(12.))
-                            .text_color(Hsla::from(self.theme.editor.text_2)),
+                            .text_color(Hsla::from(self.theme.editor.icon)),
                     ),
             );
         }
@@ -9212,7 +9215,7 @@ impl EditorWindow {
                                             svg()
                                                 .path("icons/circle-plus.svg")
                                                 .size(px(16.))
-                                                .text_color(Hsla::from(theme.editor.text_2)),
+                                                .text_color(Hsla::from(theme.editor.icon)),
                                         )
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.open_preset_dialog(
@@ -9293,7 +9296,7 @@ impl EditorWindow {
                         svg()
                             .path("icons/gear.svg")
                             .size(px(16.))
-                            .text_color(Hsla::from(theme.editor.text_2)),
+                            .text_color(Hsla::from(theme.editor.icon)),
                     )
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(
@@ -10021,8 +10024,8 @@ impl EditorWindow {
         div()
             .size_full()
             .flex()
-            .flex_col()
-            .rounded(px(12.))
+            .flex_row()
+            .rounded(px(look::RADIUS_PANEL))
             .border_1()
             .border_color(self.card_line())
             .bg(self.panel_bg())
@@ -10030,18 +10033,18 @@ impl EditorWindow {
             .child(
                 div()
                     .flex()
-                    .flex_row()
+                    .flex_col()
                     .items_center()
-                    .justify_between()
-                    .px(px(10.))
-                    .h(px(44.))
+                    .gap(px(8.))
+                    .pt(px(8.))
+                    .w(px(SIDEBAR_RAIL_WIDTH))
                     .flex_none()
                     .children(
                         crate::editor_sidebar::SidebarTab::ALL
                             .into_iter()
                             .map(|tab| {
                                 div()
-                                    .size(px(28.))
+                                    .size(px(52.))
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -10049,13 +10052,20 @@ impl EditorWindow {
                                     .child(
                                         svg()
                                             .path(tab.icon())
-                                            .size(px(15.))
-                                            .text_color(Hsla::from(theme.editor.text_2)),
+                                            .size(px(22.))
+                                            .text_color(Hsla::from(theme.editor.icon)),
                                     )
                             }),
                     ),
             )
-            .child(loading::sidebar(&theme, animated))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(loading::sidebar(&theme, animated)),
+            )
             .into_any_element()
     }
 
@@ -10331,7 +10341,7 @@ impl EditorWindow {
                 svg()
                     .path(icon)
                     .size(px(16.))
-                    .text_color(Hsla::from(theme.editor.text_2))
+                    .text_color(Hsla::from(theme.editor.icon))
                     .group_hover(SharedString::from(format!("{id}-group")), move |style| {
                         style.text_color(Hsla::from(theme.editor.text_1))
                     }),
@@ -10398,7 +10408,7 @@ impl EditorWindow {
                     svg()
                         .path(glyph)
                         .size(px(14.))
-                        .text_color(Hsla::from(editor.text_2)),
+                        .text_color(Hsla::from(editor.icon)),
                 )
                 .on_click(handler)
         };
@@ -11823,6 +11833,20 @@ impl Render for EditorWindow {
                                     .min_h_0()
                                     .px(px(8.))
                                     .min_h(px(layout.player_min_height))
+                                    // The settings rail, left of the player in
+                                    // the reference design. The 8px gutter is the
+                                    // wrapper's, not the sidebar view's: a
+                                    // margin inside a cached element is not
+                                    // honoured.
+                                    .child(
+                                        div().flex_none().h_full().pr(px(8.)).child(
+                                            self.sidebar_view.clone().cached(
+                                                StyleRefinement::default()
+                                                    .w(px(SIDEBAR_WIDTH + SIDEBAR_RAIL_WIDTH))
+                                                    .h_full(),
+                                            ),
+                                        ),
+                                    )
                                     // The player card.
                                     .child(
                                         div()
@@ -11831,25 +11855,13 @@ impl Render for EditorWindow {
                                             .flex_1()
                                             .min_w_0()
                                             .min_h_0()
-                                            .rounded(px(12.))
+                                            .rounded(px(look::RADIUS_PANEL))
                                             .border_1()
                                             .border_color(self.card_line())
                                             .bg(self.panel_bg())
                                             .shadow(theme.editor.card_shadow())
                                             .overflow_hidden()
                                             .child(self.render_player(cx)),
-                                    )
-                                    // The 8px gutter is the wrapper's, not the
-                                    // sidebar view's: a margin inside a cached
-                                    // element is not honoured.
-                                    .child(
-                                        div().flex_none().h_full().pl(px(8.)).child(
-                                            self.sidebar_view.clone().cached(
-                                                StyleRefinement::default()
-                                                    .w(px(SIDEBAR_WIDTH))
-                                                    .h_full(),
-                                            ),
-                                        ),
                                     ),
                             )
                             // The timeline card: the wrapper is owned here so
@@ -13102,7 +13114,7 @@ mod tests {
         let layout = EditorVerticalLayout::new(652., DEFAULT_TIMELINE_HEIGHT);
         assert_eq!(layout.player_min_height, MIN_PLAYER_HEIGHT);
         assert_eq!(layout.timeline_height, DEFAULT_TIMELINE_HEIGHT);
-        assert_eq!(editor_player_width(992.), 550.);
+        assert_eq!(editor_player_width(992.), 550. - SIDEBAR_RAIL_WIDTH);
     }
 
     #[test]
@@ -13185,7 +13197,7 @@ mod tests {
         assert!(!compact_header_controls(992., false, true));
         assert!(compact_header_controls(800., true, false));
         assert!(compact_header_controls(800., false, true));
-        assert_eq!(editor_player_width(800.), 358.);
+        assert_eq!(editor_player_width(800.), 358. - SIDEBAR_RAIL_WIDTH);
     }
 
     fn open_sidebar_menu_for_test(

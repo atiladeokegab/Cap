@@ -119,7 +119,8 @@ const TRACK_TILE_SIZE: f32 = 22.;
 const TRACK_TILE_INSET: f32 = 4.;
 /// The segment's radius, its left accent bar and the content inset that clears
 /// it (`0 10px 0 13px`).
-const SEGMENT_RADIUS: f32 = 8.;
+/// The reference design's clip radius.
+const SEGMENT_RADIUS: f32 = 4.;
 const SEGMENT_ACCENT_BAR: f32 = 3.;
 const SEGMENT_PADDING_LEFT: f32 = 13.;
 const SEGMENT_PADDING_RIGHT: f32 = 10.;
@@ -176,10 +177,9 @@ pub const MINIMAP_MAX_WIDTH: f32 = 78.;
 /// The single source of truth for track colour is eleven CSS custom properties
 /// with one definition each -- not per-appearance values -- so they are literal
 /// in both themes exactly as they are there
-/// (`apps/desktop/src/styles/theme.css`).
+/// (`apps/desktop/src/styles/theme.css`). The clip and zoom lanes are the
+/// exception: the reference design paints them from the theme's lane tokens.
 pub mod track_color {
-    pub const CLIP: u32 = 0x3b82f6;
-    pub const ZOOM: u32 = 0x64748b;
     pub const CAPTION: u32 = 0x0ea5e9;
     pub const KEYBOARD: u32 = 0xf97316;
     pub const STYLE: u32 = 0xec4899;
@@ -979,8 +979,12 @@ impl TrackKind {
     }
 
     pub fn color(self) -> Hsla {
+        // The lane tokens are one colour in both themes, so the light palette
+        // answers for either.
+        let lanes = crate::theme::EditorPalette::light();
         gpui::rgb(match self {
-            Self::Clip => track_color::CLIP,
+            Self::Clip => return lanes.clip_from.into(),
+            Self::Zoom => return lanes.zoom_from.into(),
             Self::Style => track_color::STYLE,
             Self::Image => track_color::IMAGE,
             Self::Caption => track_color::CAPTION,
@@ -988,7 +992,6 @@ impl TrackKind {
             Self::Text => track_color::TEXT,
             Self::Mask => track_color::MASK,
             Self::Audio => track_color::AUDIO,
-            Self::Zoom => track_color::ZOOM,
             Self::ThreeD => track_color::THREE_D,
             Self::Scene => track_color::SCENE,
         })
@@ -2677,10 +2680,18 @@ fn render_segment(
     split_mode: bool,
     camera3d_editing_end: bool,
 ) -> AnyElement {
-    let color = if matches!(segment.detail, SegmentDetail::Clip { muted: true, .. }) {
-        muted_clip_color(theme)
-    } else {
-        kind.color()
+    let muted = matches!(segment.detail, SegmentDetail::Clip { muted: true, .. });
+    // The reference design paints the clip and zoom lanes as solid top-to-bottom gradients;
+    // their waveform, label and handles key off the lighter stop.
+    let gradient = match kind {
+        TrackKind::Clip if !muted => Some((theme.editor.clip_from, theme.editor.clip_to)),
+        TrackKind::Zoom => Some((theme.editor.zoom_from, theme.editor.zoom_to)),
+        _ => None,
+    };
+    let color = match gradient {
+        Some((_, to)) => Hsla::from(to),
+        None if muted => muted_clip_color(theme),
+        None => kind.color(),
     };
     let x = ((segment.start - view.transform.position) / secs_per_pixel) as f32;
     let width = ((segment.end - segment.start) / secs_per_pixel) as f32;
@@ -2709,17 +2720,23 @@ fn render_segment(
         .flex_row()
         .rounded(px(SEGMENT_RADIUS))
         .overflow_hidden()
-        .bg(seg_fill(theme, color, selected))
-        .child(
-            div()
-                .absolute()
-                .top(px(SEGMENT_RADIUS))
-                .bottom(px(SEGMENT_RADIUS))
-                .left(px(2.))
-                .w(px(SEGMENT_ACCENT_BAR))
-                .rounded_full()
-                .bg(color),
-        );
+        .map(|fill| match gradient {
+            Some((from, to)) => fill.bg(gpui::linear_gradient(
+                180.,
+                gpui::linear_color_stop(from, 0.),
+                gpui::linear_color_stop(to, 1.),
+            )),
+            None => fill.bg(seg_fill(theme, color, selected)).child(
+                div()
+                    .absolute()
+                    .top(px(SEGMENT_RADIUS))
+                    .bottom(px(SEGMENT_RADIUS))
+                    .left(px(2.))
+                    .w(px(SEGMENT_ACCENT_BAR))
+                    .rounded_full()
+                    .bg(color),
+            ),
+        });
 
     // The clip track's waveform and its per-second markings, both under the
     // label (`TL/ClipTrack.tsx:943-957`).
@@ -2758,9 +2775,18 @@ fn render_segment(
         }
     }
 
+    // The reference design sets its lane labels in a dark ink of the lane's own hue; the
+    // lighter stop would read mid-green on the gradient.
+    let label_color = match gradient {
+        Some((from, _)) => Hsla {
+            l: 0.18,
+            ..Hsla::from(from)
+        },
+        None => color,
+    };
     fill = fill.child(render_label(
         theme,
-        color,
+        label_color,
         segment,
         visible_width,
         center_x,
@@ -3728,51 +3754,68 @@ pub fn ghost_offset(view: TimelineView, content_width: f32) -> Option<f32> {
         .map(|time| ((time - view.transform.position) / secs_per_pixel) as f32)
 }
 
-/// The playhead: a 1px column from the ruler's baseline to the bottom of the
-/// card, with a 12px head ringed in the card's own colour so it reads as a
-/// knob rather than a dot on the line. gpui has no outline, so the ring is a
-/// wider circle of card painted under the head.
+/// The playhead, as the reference design draws it: a 2px column from the ruler's baseline
+/// to the bottom of the card, under a 10x14 rounded tab.
 pub fn render_playhead(theme: &Theme, x: f32, opacity: f32) -> AnyElement {
     let color = Hsla::from(theme.editor.playhead);
+    render_line(color, x, 2., opacity, Some((10., 14., 3., color, None)))
+}
+
+/// The hover preview line (`TL/index.tsx:1255-1277`): 1px, with a 10px dot
+/// ringed in the card's own colour. gpui has no outline, so the ring is a
+/// wider circle of card painted under the dot.
+pub fn render_preview_line(theme: &Theme, x: f32) -> AnyElement {
+    let color = with_alpha(Hsla::from(theme.editor.text_3), 0.5);
     render_line(
         color,
         x,
-        opacity,
-        Some((12., color, theme.editor.card.into())),
+        1.,
+        1.,
+        Some((10., 10., 5., color, Some(theme.editor.card.into()))),
     )
 }
 
-/// The hover preview line (`TL/index.tsx:1255-1277`).
-pub fn render_preview_line(theme: &Theme, x: f32) -> AnyElement {
-    let color = with_alpha(Hsla::from(theme.editor.text_3), 0.5);
-    render_line(color, x, 1., Some((10., color, theme.editor.card.into())))
-}
-
-fn render_line(color: Hsla, x: f32, opacity: f32, head: Option<(f32, Hsla, Hsla)>) -> AnyElement {
+/// `head` is (width, height, radius, fill, ring), centred on the line's top.
+fn render_line(
+    color: Hsla,
+    x: f32,
+    width: f32,
+    opacity: f32,
+    head: Option<(f32, f32, f32, Hsla, Option<Hsla>)>,
+) -> AnyElement {
     div()
         .absolute()
         // `left: ${TIMELINE_PADDING + TRACK_GUTTER}px` (`TL/index.tsx:1285`),
         // measured from the card's padding box -- which is where gpui resolves
-        // an absolutely positioned child from too.
-        .left(px(TIMELINE_PADDING + TRACK_GUTTER + x))
+        // an absolutely positioned child from too. A wider line stays centred
+        // on the playhead's x.
+        .left(px(TIMELINE_PADDING + TRACK_GUTTER + x - (width - 1.) / 2.))
         .top(px(PLAYHEAD_TOP_OFFSET))
         .bottom_0()
-        .w(px(1.))
+        .w(px(width))
         .opacity(opacity)
         .bg(color)
-        .children(head.map(|(size, fill, ring)| {
-            let ring_size = size + 4.;
+        .children(head.map(|(head_w, head_h, radius, fill, ring)| {
+            let ring_width = if ring.is_some() { 2. } else { 0. };
+            let (outer_w, outer_h) = (head_w + ring_width * 2., head_h + ring_width * 2.);
             div()
                 .absolute()
-                .top(px(-ring_size / 2.))
-                .left(px(-(ring_size - 1.) / 2.))
-                .size(px(ring_size))
-                .rounded_full()
+                .top(px(-outer_h / 2.))
+                .left(px(-(outer_w - width) / 2.))
+                .w(px(outer_w))
+                .h(px(outer_h))
+                .rounded(px(radius + ring_width))
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(ring)
-                .child(div().size(px(size)).rounded_full().bg(fill))
+                .when_some(ring, |this, ring| this.bg(ring))
+                .child(
+                    div()
+                        .w(px(head_w))
+                        .h(px(head_h))
+                        .rounded(px(radius))
+                        .bg(fill),
+                )
         }))
         .into_any_element()
 }
@@ -5260,7 +5303,7 @@ mod tests {
                             - rounded_corner_inset(
                                 local_x,
                                 width as f64,
-                                (width as f64 / 2.).min(8.),
+                                (width as f64 / 2.).min(f64::from(SEGMENT_RADIUS)),
                             );
                         assert!(
                             y <= bottom + 0.05,

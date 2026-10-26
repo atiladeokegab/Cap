@@ -191,14 +191,17 @@ impl PauseControlState {
 struct PauseControlOutcome {
     paused: Option<bool>,
     error: Option<String>,
+    /// The resumed segment's epoch, as the recording actor reported it.
+    resumed_at: Option<Instant>,
 }
 
 async fn run_pause_control(
     expected_paused: bool,
-    control: impl Future<Output = anyhow::Result<()>>,
+    control: impl Future<Output = anyhow::Result<Option<Instant>>>,
     query_paused: impl Future<Output = anyhow::Result<bool>>,
 ) -> PauseControlOutcome {
     let result = control.await;
+    let resumed_at = result.as_ref().ok().copied().flatten();
     let state = tokio::time::timeout(Duration::from_secs(2), query_paused).await;
     let (paused, state_error) = match state {
         Ok(Ok(true)) => (Some(true), None),
@@ -218,7 +221,11 @@ async fn run_pause_control(
             (paused != Some(expected_paused))
                 .then(|| "Capture did not acknowledge the requested pause state".into())
         });
-    PauseControlOutcome { paused, error }
+    PauseControlOutcome {
+        paused,
+        error,
+        resumed_at,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -361,13 +368,14 @@ impl CleanControlState {
 struct CleanControlOutcome {
     paused: Option<bool>,
     error: Option<String>,
+    resumed_at: Option<Instant>,
 }
 
 #[cfg(target_os = "linux")]
 async fn after_clean_visibility(
     visibility: Option<crate::app_windows::CleanVisibility>,
-    control: impl Future<Output = anyhow::Result<()>>,
-) -> anyhow::Result<()> {
+    control: impl Future<Output = anyhow::Result<Option<Instant>>>,
+) -> anyhow::Result<Option<Instant>> {
     if let Some(visibility) = visibility {
         visibility.await?;
     }
@@ -377,7 +385,7 @@ async fn after_clean_visibility(
 #[cfg(target_os = "linux")]
 async fn run_clean_control(
     kind: CleanControlKind,
-    control: impl Future<Output = anyhow::Result<()>>,
+    control: impl Future<Output = anyhow::Result<Option<Instant>>>,
     query_paused: impl Future<Output = anyhow::Result<bool>>,
     settle: impl Future<Output = ()>,
 ) -> CleanControlOutcome {
@@ -386,6 +394,7 @@ async fn run_clean_control(
     }
     let result = control.await;
     let control_succeeded = result.is_ok();
+    let resumed_at = result.as_ref().ok().copied().flatten();
     let state = tokio::time::timeout(Duration::from_secs(2), query_paused).await;
     let (paused, state_error) = match state {
         Ok(Ok(paused)) => (Some(paused), None),
@@ -409,7 +418,11 @@ async fn run_clean_control(
             (paused != Some(expected))
                 .then(|| "Capture did not acknowledge the requested pause state".into())
         });
-    CleanControlOutcome { paused, error }
+    CleanControlOutcome {
+        paused,
+        error,
+        resumed_at,
+    }
 }
 
 pub struct RecordingSession {
@@ -454,6 +467,8 @@ pub struct RecordingSession {
     countdown_remaining: Option<u32>,
     countdown_cue_abort: Option<futures_util::future::AbortHandle>,
     start_gate: Option<cap_recording::RecordingStartGate>,
+    /// The teleprompter's shot marks read this, never `elapsed()`.
+    shot_clock: crate::shots::ShotClock,
     start_cue: Option<crate::app_sounds::StartCue>,
     /// A capture pipeline that finished warming up while the countdown or the
     /// start cue was still running; activated the moment the cue ends.
@@ -508,6 +523,7 @@ impl RecordingSession {
             countdown_remaining: None,
             countdown_cue_abort: None,
             start_gate: None,
+            shot_clock: Default::default(),
             start_cue: None,
             primed: None,
             primed_ready: None,
@@ -557,6 +573,28 @@ impl RecordingSession {
                 .map(|since| since.elapsed())
                 .unwrap_or_default();
         started_at.elapsed().saturating_sub(paused)
+    }
+
+    /// The live take's dir, paused or not. Studio only -- an instant
+    /// recording has no segments.
+    pub fn shot_take(&self) -> Option<std::path::PathBuf> {
+        if self.mode() != Some(recording::RecordingMode::Studio) {
+            return None;
+        }
+        Some(self.active.as_ref()?.project_dir.clone())
+    }
+
+    /// Where a shot mark goes and when it lands: the take's dir and
+    /// `(segment, time_ms)` on the start-gate clock `cursor.json` uses.
+    pub fn shot_time(&self) -> Option<(std::path::PathBuf, (u32, u64))> {
+        let take = self.shot_take()?;
+        let armed = self
+            .start_gate
+            .as_ref()
+            .and_then(cap_recording::RecordingStartGate::armed_at)
+            .map(|armed| armed.instant());
+        let at = self.shot_clock.read(armed, Instant::now())?;
+        Some((take, at))
     }
 
     pub fn is_paused(&self) -> bool {
@@ -958,6 +996,7 @@ impl RecordingSession {
         self.started_at = Some(Instant::now());
         self.paused_accum = Duration::ZERO;
         self.paused_since = None;
+        self.shot_clock = Default::default();
         self.start_cue = None;
         if self.mode() == Some(recording::RecordingMode::Studio) {
             crate::app_windows::prewarm_shared_wgpu_device(cx);
@@ -1440,6 +1479,7 @@ impl RecordingSession {
                 Err(error) => PauseControlOutcome {
                     paused: None,
                     error: Some(format!("Capture control task failed: {error}")),
+                    resumed_at: None,
                 },
             };
             this.update(cx, |this, cx| {
@@ -1454,12 +1494,15 @@ impl RecordingSession {
                 if let Some(paused) = outcome.paused {
                     let was_paused = this.is_paused();
                     this.phase = Phase::Recording { paused };
+                    crate::window_log::set_paused(paused);
                     if was_paused && !paused {
                         if let Some(since) = this.paused_since.take() {
                             this.paused_accum += since.elapsed();
                         }
+                        this.shot_clock.resume(outcome.resumed_at);
                     } else if !was_paused && paused {
                         this.paused_since = Some(Instant::now());
+                        this.shot_clock.pause();
                     }
                 }
                 if this.pause_control_error.is_some() && this.error == this.pause_control_error {
@@ -1578,7 +1621,7 @@ impl RecordingSession {
         let control = match kind {
             CleanControlKind::Resume => active.resume_handle(),
             CleanControlKind::Pause => active.pause_handle(),
-            CleanControlKind::VerifyPaused => Box::pin(async { Ok(()) }),
+            CleanControlKind::VerifyPaused => Box::pin(async { Ok(None) }),
         };
         let query_paused = active.is_paused_handle();
         let visibility = if kind == CleanControlKind::Resume {
@@ -1616,6 +1659,7 @@ impl RecordingSession {
                 Err(error) => CleanControlOutcome {
                     paused: None,
                     error: Some(format!("Capture control task failed: {error}")),
+                    resumed_at: None,
                 },
             };
             this.update(cx, |this, cx| {
@@ -1629,12 +1673,15 @@ impl RecordingSession {
                 if let Some(paused) = outcome.paused {
                     let was_paused = this.is_paused();
                     this.phase = Phase::Recording { paused };
+                    crate::window_log::set_paused(paused);
                     if was_paused && !paused {
                         if let Some(since) = this.paused_since.take() {
                             this.paused_accum += since.elapsed();
                         }
+                        this.shot_clock.resume(outcome.resumed_at);
                     } else if !was_paused && paused {
                         this.paused_since = Some(Instant::now());
+                        this.shot_clock.pause();
                     }
                 }
                 if let Some(error) = outcome.error {
@@ -2206,7 +2253,7 @@ mod clean_capture_tests {
         });
         let control = async move {
             observed.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
+            Ok(None)
         };
         let mut pending = Box::pin(after_clean_visibility(Some(visibility), control));
         assert!(futures_util::poll!(&mut pending).is_pending());
@@ -2314,7 +2361,7 @@ mod clean_capture_tests {
         let mut task = tokio::spawn(futures_util::future::Abortable::new(
             run_clean_control(
                 CleanControlKind::Pause,
-                async { Ok(()) },
+                async { Ok(None) },
                 async {
                     queried_tx.send(()).unwrap();
                     Ok(ack_rx.await.unwrap())
@@ -2378,7 +2425,7 @@ mod clean_capture_tests {
     async fn actor_transport_error_never_confirms_a_safe_pause() {
         let outcome = run_clean_control(
             CleanControlKind::Pause,
-            async { Ok(()) },
+            async { Ok(None) },
             async { anyhow::bail!("actor stopped") },
             async {},
         )
@@ -2407,7 +2454,7 @@ mod clean_capture_tests {
                 async move {
                     let _guard = Dropped(control_dropped);
                     started_tx.send(()).unwrap();
-                    std::future::pending::<anyhow::Result<()>>().await
+                    std::future::pending::<anyhow::Result<Option<Instant>>>().await
                 },
                 async { panic!("A cancelled resume must not query state") },
                 async {},
@@ -2437,7 +2484,8 @@ mod clean_capture_tests {
             Phase::Stopping,
             &CleanControlOutcome {
                 paused: Some(true),
-                error: None
+                error: None,
+                resumed_at: None
             }
         ));
     }
@@ -2455,7 +2503,7 @@ mod clean_capture_tests {
                 CleanControlKind::Resume,
                 async move {
                     called.store(true, std::sync::atomic::Ordering::Release);
-                    Ok(())
+                    Ok(None)
                 },
                 async { Ok(false) },
                 async {
@@ -2483,7 +2531,7 @@ mod clean_capture_tests {
             let (ticket, _) = state.begin(prior, CleanControlKind::Pause);
             let outcome = run_clean_control(
                 CleanControlKind::Pause,
-                async { Ok(()) },
+                async { Ok(None) },
                 async { Ok(true) },
                 async {},
             )
@@ -2504,7 +2552,7 @@ mod clean_capture_tests {
     async fn successful_resume_requires_nonpaused_ack_and_never_authorizes_main() {
         let outcome = run_clean_control(
             CleanControlKind::Resume,
-            async { Ok(()) },
+            async { Ok(None) },
             async { Ok(false) },
             async {},
         )
@@ -2527,7 +2575,7 @@ mod clean_capture_tests {
     async fn missing_paused_acknowledgement_times_out_without_authorizing_main() {
         let outcome = run_clean_control(
             CleanControlKind::Pause,
-            async { Ok(()) },
+            async { Ok(None) },
             std::future::pending::<anyhow::Result<bool>>(),
             async {},
         )
@@ -2680,7 +2728,7 @@ mod pause_control_tests {
             true,
             async {
                 receive.await?;
-                Ok(())
+                Ok(None)
             },
             async move {
                 observed.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2693,6 +2741,32 @@ mod pause_control_tests {
         let outcome = control.await;
         assert_eq!(outcome.paused, Some(true));
         assert!(outcome.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_delayed_resume_acknowledgement_marks_from_the_actors_epoch() {
+        let armed = Instant::now();
+        let outcome = run_pause_control(
+            false,
+            async {
+                // The segment starts recording, then the acknowledgement lags.
+                let segment_epoch = Instant::now();
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                Ok(Some(segment_epoch))
+            },
+            async { Ok(false) },
+        )
+        .await;
+        assert_eq!(outcome.paused, Some(false));
+        let mut clock = crate::shots::ShotClock::default();
+        clock.pause();
+        clock.resume(outcome.resumed_at);
+        let (segment, time_ms) = clock.read(Some(armed), Instant::now()).unwrap();
+        assert_eq!(segment, 1);
+        assert!(
+            time_ms >= 80,
+            "{time_ms} ms counts from the acknowledgement"
+        );
     }
 
     #[tokio::test]
