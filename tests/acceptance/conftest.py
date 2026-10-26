@@ -38,6 +38,36 @@ def source(path):
     return target.read_text()
 
 
+def validate_contract(name, value, version=None):
+    if version is None:
+        assert (ROOT / "contracts/vendor").is_dir(), "Missing released vendored contracts"
+        releases = [
+            p
+            for p in (ROOT / "contracts/vendor").iterdir()
+            if p.is_dir() and re.fullmatch(r"\d+\.\d+\.\d+", p.name)
+        ]
+        assert len(releases) == 1, "Choose the take's exact vendored contracts version"
+        version = releases[0].name
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+    schema = ROOT / "contracts/vendor" / version / (name + ".schema.json")
+    assert schema.is_file(), f"Missing released contract: {schema}"
+    run(
+        [
+            "uv",
+            "run",
+            "--offline",
+            "--no-project",
+            "--with",
+            "jsonschema",
+            "python",
+            "-c",
+            "import json,sys; from jsonschema import validate; validate(json.load(sys.stdin),json.load(open(sys.argv[1])))",
+            str(schema),
+        ],
+        input=json.dumps(value),
+    )
+
+
 @pytest.fixture
 def driver():
     command = shlex.split(
@@ -71,7 +101,7 @@ def workflow_text():
             if not line.lstrip().startswith("#")
         )
         if (
-            re.search(r"['\"]v\*['\"]", text)
+            re.search(r"['\"]?v\*['\"]?(?=\s|$)", text)
             and "workflow_dispatch" in text
             and "windows-2022" in text
         ):

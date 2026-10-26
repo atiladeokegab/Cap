@@ -1,6 +1,16 @@
 import os
+import re
 
 from conftest import run, source
+
+
+def acceptance_ran(output):
+    return re.search(r"\b2 passed, \d+ deselected\b", output)
+
+
+def test_summary_requires_pytest_acceptance_not_cargo_passes():
+    assert acceptance_ran("2 passed, 35 deselected in 0.12s")
+    assert not acceptance_ran("test result: ok. 1550 passed; 0 failed")
 
 
 def test_make_check_runs_the_offline_spine_without_recursion():
@@ -20,6 +30,6 @@ def test_make_check_runs_the_offline_spine_without_recursion():
             "GIT_TERMINAL_PROMPT": "0",
         },
     )
-    assert "passed" in output, (
+    assert acceptance_ran(output), (
         "make check must execute acceptance tests, not just echo a recipe"
     )

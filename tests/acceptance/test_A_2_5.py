@@ -1,7 +1,7 @@
 import json
 import re
 
-from conftest import digest, file_snapshot, finish_take
+from conftest import digest, file_snapshot, finish_take, validate_contract
 
 
 def test_final_manifest_is_last_complete_hashed_and_versioned(mirror):
@@ -12,6 +12,8 @@ def test_final_manifest_is_last_complete_hashed_and_versioned(mirror):
     assert puts[0][0].endswith("/stop.json")
     assert puts[-1][0].endswith("/take-manifest.json")
     manifest = json.loads(puts[-1][1])
+    validate_contract("take-manifest", manifest, manifest["contracts_version"])
+    validate_contract("stop", json.loads(puts[0][1]), manifest["contracts_version"])
     files = {item["path"]: item for item in manifest["files"]}
     assert len(files) == len(manifest["files"])
     assert set(files) == set(expected)

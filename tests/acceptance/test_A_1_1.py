@@ -8,7 +8,7 @@ def check_release(text):
     assert events, "Release must declare its triggers explicitly"
     triggers = events.group(1)
     assert "workflow_dispatch:" in triggers
-    assert re.search(r"['\"]v\*['\"]", triggers)
+    assert re.search(r"['\"]?v\*['\"]?(?=\s|$)", triggers)
     assert not re.search(r"(?m)^  (pull_request|schedule|workflow_call):", triggers)
     assert "branches:" not in triggers, "Do not spend Windows builds on branch pushes"
     jobs = re.search(r"(?ms)^jobs:\s*\n(.*)", text)

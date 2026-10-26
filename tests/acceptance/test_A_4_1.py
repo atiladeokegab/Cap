@@ -11,7 +11,7 @@ def test_windows_dispatch_fixture_uses_real_clicks_and_keeps_take():
         workflow,
     )
     assert windows, "Need a dedicated windows-2022 recording-fixture job"
-    job = windows.group()
+    job = re.sub(r"(?m)#.*$", "", windows.group())
     assert "cap-verify-stimulus" in job
     assert "SendInput" in job, (
         "The stimulus must change in response to real scripted clicks"

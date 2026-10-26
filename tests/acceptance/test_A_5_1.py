@@ -1,4 +1,4 @@
-from conftest import source
+from conftest import source, validate_contract
 
 
 def test_windows_emit_only_changes_on_recording_epoch(driver):
@@ -14,6 +14,8 @@ def test_windows_emit_only_changes_on_recording_epoch(driver):
         ],
     )
     lines = result["lines"]
+    for line in lines:
+        validate_contract("windows", line)
     assert [line["time_ms"] for line in lines] == [100, 600, 850]
     assert [line["title"] for line in lines] == ["Démo", "Result", "Result"]
     assert [line["process"] for line in lines] == ["demo.exe", "demo.exe", "other.exe"]
