@@ -31,7 +31,13 @@ for i in $(seq 5); do one idle "$i"; done
 burn=()
 for _ in $(seq 12); do yes >/dev/null & burn+=($!); done
 for i in $(seq 5); do one cpu "$i"; done
+for i in $(seq 5); do CAP_PROBE_DECODER_QOS=25 one cpuqos25 "$i"; done
+for i in $(seq 5); do CAP_PROBE_DECODER_QOS=33 one cpuqos33 "$i"; done
 kill "${burn[@]}"
+for arm in cpu cpuqos25 cpuqos33; do
+  grep -h "avf-step next_sample_buf" "$out"/$arm-*.log | awk -v a=$arm '{s+=$3; n++} END {printf "%s next_sample_buf>=20ms n=%d avg %.1f\n", a, n, (n?s/n:0)}'
+  grep -h "seek=true" "$out/$arm.txt" | grep avf | head -3
+done
 grep -h "avf-step" "$out"/idle-*.log | awk '{s[$2]+=$3; n[$2]++} END {for (k in s) printf "idle %s avg %.1f ms n=%d\n", k, s[k]/n[k], n[k]}'
 grep -h "avf-step" "$out"/cpu-*.log | awk '{s[$2]+=$3; n[$2]++; if ($3>m[$2]) m[$2]=$3} END {for (k in s) printf "cpu %s avg %.1f ms max %.1f n=%d\n", k, s[k]/n[k], m[k], n[k]}'
 for f in "$out"/cpu-1.log "$out"/idle-1.log; do

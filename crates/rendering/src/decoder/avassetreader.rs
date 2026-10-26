@@ -655,6 +655,18 @@ impl AVAssetReaderDecoder {
         let handle = tokio::runtime::Handle::current();
 
         std::thread::spawn(move || {
+            if let Some(class) = std::env::var("CAP_PROBE_DECODER_QOS")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+            {
+                unsafe extern "C" {
+                    fn pthread_set_qos_class_self_np(class: u32, relative: i32) -> i32;
+                }
+                // SAFETY: sets the calling thread's own QoS class.
+                unsafe {
+                    pthread_set_qos_class_self_np(class, 0);
+                }
+            }
             Self::run(name, path, fps, rx, ready_tx, handle, sequential_access)
         });
     }
