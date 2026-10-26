@@ -16,17 +16,19 @@ def fixture(name):
     return json.loads((FIXTURES / f"{name}.json").read_text())
 
 
-def zoom(driver, take, **fields):
+def zoom(driver, recording, **fields):
     """The zoom track the app generates, in seconds; Cap's cursor.json moves
     and clicks go in as recorded, keys as key-down times."""
     result = driver(
         "zoom",
-        moves=take["cursor"]["moves"],
-        clicks=take["cursor"]["clicks"],
+        moves=recording["cursor"]["moves"],
+        clicks=recording["cursor"]["clicks"],
         keys=[
-            {"time_ms": k["time_ms"]} for k in take["keyboard"]["presses"] if k["down"]
+            {"time_ms": k["time_ms"]}
+            for k in recording["keyboard"]["presses"]
+            if k["down"]
         ],
-        duration_ms=take["duration_s"] * 1000,
+        duration_ms=recording["duration_s"] * 1000,
         **fields,
     )
     assert "segments" in result, f"cap-driver has no zoom op: {result}"
@@ -297,3 +299,38 @@ def test_a_shot_marked_zoom_none_gets_no_zoom(driver, tmp_path):
     assert not any(overlaps(s, 20.0, 40.0) for s in segments), segments
     assert any(overlaps(s, 0.0, 20.0) for s in segments)
     assert any(overlaps(s, 40.0, 60.0) for s in segments)
+
+
+def test_a_take_keeps_its_zoom_none_after_pickups_are_republished(driver, tmp_path):
+    # The take is marked against a list whose demo shot says zoom: none; the
+    # film then republishes pick-ups without it. The editor resolves the
+    # opt-out from the list recorded with the take, not the live one.
+    take = Take(60.0)
+    for start in (5.0, 25.0, 45.0):
+        take.clicks(start, start + 4.0, 0.3, box(0.3, 0.3, 0.05))
+    recorded = {
+        "shots": [
+            {"shot_id": "intro", "title": "Intro", "lines": []},
+            {"shot_id": "demo", "title": "Demo", "lines": [], "zoom": "none"},
+            {"shot_id": "ask", "title": "Ask", "lines": []},
+        ]
+    }
+    pickups = {"shots": [{"shot_id": "demo", "title": "Demo", "lines": []}]}
+    driver(
+        "shots",
+        shotlist=recorded,
+        epoch_ms=0,
+        script=[
+            {"at_ms": 0, "action": "take_start", "take": str(tmp_path)},
+            {"at_ms": 0, "action": "next"},
+            {"at_ms": 20000, "action": "next"},
+            {"at_ms": 40000, "action": "next"},
+        ],
+    )
+    segments = zoom(driver, take.take, take=str(tmp_path), shotlist=pickups)
+    assert not any(overlaps(s, 20.0, 40.0) for s in segments), segments
+    assert any(overlaps(s, 40.0, 60.0) for s in segments)
+    # Control: without the recorded list the live pick-ups decide, and demo zooms.
+    (tmp_path / "shotlist.json").unlink()
+    control = zoom(driver, take.take, take=str(tmp_path), shotlist=pickups)
+    assert any(overlaps(s, 20.0, 40.0) for s in control), control

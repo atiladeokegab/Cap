@@ -321,7 +321,7 @@ impl TeleprompterWindow {
             // A take starts: the film may have republished the list (pick-ups).
             let take = RecordingSession::global(cx).read(cx).shot_take();
             if take.is_some() && take != this.take {
-                this.read_shot_list(window, cx);
+                this.read_shot_list(false, window, cx);
             }
             this.take = take;
             cx.notify();
@@ -330,7 +330,9 @@ impl TeleprompterWindow {
 
         // The bucket GET blocks for up to its timeout: off the main thread,
         // with the stock teleprompter until it lands.
-        cx.defer_in(window, |this, window, cx| this.read_shot_list(window, cx));
+        cx.defer_in(window, |this, window, cx| {
+            this.read_shot_list(false, window, cx)
+        });
 
         crate::theme::bind_window(window, cx);
         Self {
@@ -453,8 +455,9 @@ impl TeleprompterWindow {
     /// Reads the shot list off the main thread: as the window opens (the
     /// bucket, else the app-data file), and again when a take starts and on
     /// Reload. The newest read to land wins; a failed one keeps the list it
-    /// had, with its one-line warning.
-    fn read_shot_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// had, with its one-line warning. `during_take`: Reload pressed while a
+    /// take is live, whose list waits for the take to end.
+    fn read_shot_list(&mut self, during_take: bool, window: &mut Window, cx: &mut Context<Self>) {
         let number = self.reads.start();
         let opening = self.shots.is_none();
         cx.spawn_in(window, async move |this, cx| {
@@ -481,10 +484,13 @@ impl TeleprompterWindow {
                     return;
                 };
                 let note = list.warning.clone();
+                if let Some(note) = &note {
+                    tracing::warn!(%note, "shot list");
+                }
                 let first = this.shots.is_none();
                 let shots = match this.shots.as_mut() {
                     Some(shots) => {
-                        shots.replace(list);
+                        shots.replace(list, during_take);
                         shots
                     }
                     None => this.shots.insert(Shots::new(list)),
@@ -1333,9 +1339,9 @@ impl TeleprompterWindow {
                             .text_color(Hsla::from(theme.gray_12))
                             .child("Reload")
                             .hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.11)))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.read_shot_list(window, cx)),
-                            ),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.read_shot_list(this.take.is_some(), window, cx)
+                            })),
                     )
             })
             .when(self.shots.is_none(), |this| {

@@ -559,19 +559,11 @@ fn load_recording_activity(project_path: &std::path::Path) -> Vec<edits::ClipAct
             })
             .collect(),
     };
-    // Only a take the teleprompter marked asks for the shot list.
-    let marks: Vec<crate::shots::ShotMark> =
-        std::fs::read(project_path.join(crate::shots::SHOTS_FILE))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
-    if !marks.is_empty()
-        && let (Some(list), _) = crate::teleprompter_window::load_shot_list()
-    {
-        for (segment, from, to) in crate::shots::zoomless(&list, &marks) {
-            if let Some(clip) = clips.get_mut(segment as usize) {
-                clip.zoomless_ms.push((from as f64, to.map(|to| to as f64)));
-            }
+    for (segment, from, to) in crate::shots::take_zoomless(project_path, || {
+        crate::teleprompter_window::load_shot_list().0
+    }) {
+        if let Some(clip) = clips.get_mut(segment as usize) {
+            clip.zoomless_ms.push((from as f64, to.map(|to| to as f64)));
         }
     }
     clips
@@ -5791,12 +5783,24 @@ impl EditorWindow {
                 this.generating_auto_zoom = false;
                 this.hovering_generate_zoom = false;
                 edits::ensure_timeline(&mut this.project, &this.clip_display_durations);
+                let crop = this
+                    .project
+                    .background
+                    .crop
+                    .as_ref()
+                    .zip(this.display_resolution())
+                    .and_then(|(crop, (width, height))| {
+                        cap_rendering::CursorCropMap::from_crop(
+                            crop,
+                            cap_project::XY::new(width, height),
+                        )
+                    });
                 let segments = this
                     .project
                     .timeline
                     .as_ref()
                     .map_or_else(Vec::new, |timeline| {
-                        edits::generate_natural_zoom_for_timeline(&activity, timeline)
+                        edits::generate_natural_zoom_for_timeline(&activity, timeline, crop)
                     });
                 if segments.is_empty() {
                     tracing::info!("auto zoom produced no segments");
