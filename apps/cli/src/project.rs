@@ -9,6 +9,48 @@ use serde::Serialize;
 
 use crate::{OutputFormat, write_json};
 
+pub fn schema() -> Result<(), String> {
+    write_json(&cap_project::ProjectConfiguration::json_schema())
+}
+
+fn parse_config(settings_json: &str) -> Result<cap_project::ProjectConfiguration, String> {
+    let document: serde_json::Value = serde_json::from_str(settings_json)
+        .map_err(|e| format!("Invalid project config JSON: {e}"))?;
+    let schema = cap_project::ProjectConfiguration::json_schema();
+    let validator = jsonschema::validator_for(&schema)
+        .map_err(|e| format!("Invalid project config schema: {e}"))?;
+    if let Err(error) = validator.validate(&document) {
+        return Err(format!(
+            "Invalid project config at {}: {error}",
+            config_error_path(&error)
+        ));
+    }
+    serde_json::from_value(document).map_err(|e| format!("Invalid project config JSON: {e}"))
+}
+
+fn config_error_path(error: &jsonschema::ValidationError<'_>) -> String {
+    use jsonschema::error::ValidationErrorKind;
+    match error.kind() {
+        ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
+            context
+                .iter()
+                .flatten()
+                .map(config_error_path)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+        ValidationErrorKind::AdditionalProperties { unexpected } => unexpected
+            .iter()
+            .map(|field| {
+                let field = field.replace('~', "~0").replace('/', "~1");
+                format!("{}/{field}", error.instance_path())
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => error.instance_path().to_string(),
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectInspection {
@@ -41,8 +83,7 @@ pub fn config_set(
     settings_json: &str,
     format: OutputFormat,
 ) -> Result<(), String> {
-    let config: cap_project::ProjectConfiguration = serde_json::from_str(settings_json)
-        .map_err(|e| format!("Invalid project config JSON: {e}"))?;
+    let config = parse_config(settings_json)?;
     RecordingMeta::load_for_project(&project_path)
         .map_err(|e| format!("Failed to load recording meta: {e}"))?;
     // write() validates internally before its atomic temp-file-then-rename.
@@ -355,5 +396,67 @@ pub fn validate(project_path: PathBuf, format: OutputFormat) -> Result<(), Strin
         Ok(())
     } else {
         Err("project validation failed".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_schema_accepts_the_current_config_and_timeline() {
+        let config = cap_project::ProjectConfiguration::default();
+        parse_config(&serde_json::to_string(&config).unwrap()).unwrap();
+        parse_config(r#"{"timeline":{"segments":[],"zoomSegments":[]}}"#).unwrap();
+        let schema =
+            serde_json::to_value(cap_project::ProjectConfiguration::json_schema()).unwrap();
+        assert_eq!(
+            schema["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+    }
+
+    #[test]
+    fn generated_input_schema_preserves_legacy_aliases() {
+        parse_config(r#"{"camera":{"zoom_size":1.5,"advanced_shadow":{"size":1,"opacity":1,"blur":1},"rounding_type":"squircle"}}"#).unwrap();
+        for style in ["regular", "quick", "rapid"] {
+            parse_config(&serde_json::json!({"cursor":{"animationStyle":style}}).to_string())
+                .unwrap();
+        }
+        assert!(parse_config(r#"{"camera":{"zoomSize":1,"zoom_size":2}}"#).is_err());
+    }
+
+    #[test]
+    fn schema_rejects_misspelled_fields_and_wrong_types() {
+        for (document, field) in [
+            (
+                r#"{"timeline":{"segments":[],"zoomSegment":[]}}"#,
+                "zoomSegment",
+            ),
+            (r#"{"backgound":{}}"#, "backgound"),
+            (r#"{"screenMotionBlur":"heavy"}"#, "screenMotionBlur"),
+        ] {
+            assert!(parse_config(document).unwrap_err().contains(field));
+        }
+        assert!(
+            parse_config(r#"{"background":{"paddng":1}}"#)
+                .unwrap_err()
+                .contains("/background/paddng")
+        );
+    }
+
+    #[test]
+    fn invalid_config_cannot_replace_an_existing_document() {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().join("project-config.json");
+        std::fs::write(&path, b"original").unwrap();
+        let error = config_set(
+            project.path().to_path_buf(),
+            r#"{"timeline":{"segments":[],"zoomSegment":[]}}"#,
+            OutputFormat::Text,
+        )
+        .unwrap_err();
+        assert!(error.contains("zoomSegment"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
     }
 }

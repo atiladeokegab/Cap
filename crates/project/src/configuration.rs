@@ -17,7 +17,8 @@ use crate::DisplayNotch;
 #[cfg(test)]
 mod style_resolution_tests;
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum AspectRatio {
     #[default]
@@ -30,7 +31,8 @@ pub enum AspectRatio {
 
 pub type Color = [u16; 3];
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum BackgroundSource {
     Wallpaper {
@@ -81,7 +83,10 @@ impl Default for BackgroundSource {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct XY<T> {
     pub x: T,
@@ -203,7 +208,10 @@ impl<T> From<(T, T)> for XY<T> {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum CornerStyle {
     #[default]
@@ -211,7 +219,8 @@ pub enum CornerStyle {
     Rounded,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct Crop {
     pub position: XY<u32>,
@@ -224,7 +233,8 @@ impl Crop {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(default)]
 pub struct ShadowConfiguration {
     pub size: f32,
@@ -232,7 +242,8 @@ pub struct ShadowConfiguration {
     pub blur: f32,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct BorderConfiguration {
     pub enabled: bool,
@@ -245,7 +256,10 @@ pub struct BorderConfiguration {
 /// macOS window, MacBook bezel, ...). The video is inset inside the frame's
 /// chrome; the framed card as a whole follows padding / position / zoom
 /// exactly like the bare video does today.
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum FrameStyle {
     /// No frame: the video renders bare, exactly as before this feature.
@@ -261,7 +275,10 @@ pub enum FrameStyle {
     Macbook,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum FrameTheme {
     #[default]
@@ -269,7 +286,8 @@ pub enum FrameTheme {
     Light,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct FrameConfiguration {
     pub style: FrameStyle,
@@ -303,7 +321,10 @@ impl FrameConfiguration {
 
 /// Draws a MacBook notch over the recording. Nothing here is inferred from the
 /// video: a finished recording carries no evidence of the panel it came from.
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct NotchConfiguration {
     pub enabled: bool,
@@ -348,7 +369,8 @@ impl NotchConfiguration {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct BackgroundConfiguration {
     pub source: BackgroundSource,
@@ -405,7 +427,8 @@ impl Default for BackgroundConfiguration {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum CameraXPosition {
     Left,
@@ -414,7 +437,8 @@ pub enum CameraXPosition {
     Right,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum CameraYPosition {
     Top,
@@ -422,14 +446,18 @@ pub enum CameraYPosition {
     Bottom,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CameraPosition {
     pub x: CameraXPosition,
     pub y: CameraYPosition,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Default, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum BackgroundBlurMode {
     #[default]
@@ -439,7 +467,8 @@ pub enum BackgroundBlurMode {
     Remove,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct BackgroundBlurConfig {
     pub mode: BackgroundBlurMode,
@@ -470,7 +499,8 @@ impl Default for BackgroundBlurConfig {
 /// except `intensity` has 0 as its identity, so a default struct renders
 /// exactly like no grade at all. Adjustment fields are normalized: -1..1 for
 /// bipolar controls, 0..1 for unipolar ones.
-#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ColorCorrection {
     /// UI preset id ("none", "cinematic", ..., or "custom"). The renderer
@@ -521,7 +551,8 @@ impl Default for ColorCorrection {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ColorCorrectionConfiguration {
     pub screen: ColorCorrection,
@@ -542,7 +573,8 @@ impl Default for ColorCorrectionConfiguration {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Camera {
     pub hide: bool,
@@ -553,13 +585,16 @@ pub struct Camera {
     pub manual_position: Option<XY<f64>>,
     pub size: f32,
     #[serde(alias = "zoom_size")]
+    #[schemars(extend("x-serde-aliases" = ["zoom_size"]))]
     pub zoom_size: Option<f32>,
     pub rounding: f32,
     pub shadow: f32,
     #[serde(alias = "advanced_shadow")]
+    #[schemars(extend("x-serde-aliases" = ["advanced_shadow"]))]
     pub advanced_shadow: Option<ShadowConfiguration>,
     pub shape: CameraShape,
     #[serde(alias = "rounding_type")]
+    #[schemars(extend("x-serde-aliases" = ["rounding_type"]))]
     pub rounding_type: CornerStyle,
     #[serde(default = "Camera::default_scale_during_zoom")]
     pub scale_during_zoom: f32,
@@ -567,7 +602,8 @@ pub struct Camera {
     pub background_blur: BackgroundBlurConfig,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum CameraShape {
     #[default]
@@ -623,7 +659,8 @@ impl Default for ShadowConfiguration {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum StereoMode {
     #[default]
@@ -632,7 +669,10 @@ pub enum StereoMode {
     MonoR,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum VoiceIsolation {
     Light,
@@ -651,7 +691,8 @@ impl VoiceIsolation {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AudioConfiguration {
     pub mute: bool,
@@ -675,7 +716,10 @@ impl Default for AudioConfiguration {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum CursorType {
     #[default]
@@ -703,7 +747,8 @@ impl CursorType {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CursorRippleConfig {
     pub enabled: bool,
@@ -755,8 +800,12 @@ fn clamp_finite(value: f32, range: (f32, f32), fallback: f32) -> f32 {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
+#[schemars(extend("x-serde-enum-aliases" = ["regular", "quick", "rapid"]))]
 pub enum CursorAnimationStyle {
     Slow,
     Smooth,
@@ -767,14 +816,16 @@ pub enum CursorAnimationStyle {
     Custom,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct CursorSmoothingPreset {
     pub tension: f32,
     pub mass: f32,
     pub friction: f32,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct ClickSpringConfig {
     pub tension: f32,
@@ -792,7 +843,8 @@ impl Default for ClickSpringConfig {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenMovementSpring {
     pub stiffness: f32,
@@ -838,7 +890,8 @@ impl CursorAnimationStyle {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CursorConfiguration {
     pub hide: bool,
@@ -921,13 +974,15 @@ impl CursorConfiguration {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct HotkeysConfiguration {
     show: bool,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineSegment {
     #[serde(default, rename = "recordingSegment")]
@@ -946,7 +1001,10 @@ pub struct TimelineSegment {
     pub hide_cursor: Option<bool>,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum ClipSpeedAudioMode {
     #[default]
@@ -1019,7 +1077,10 @@ impl TimelineSegment {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, Copy)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, Copy, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "kebab-case")]
 pub enum GlideDirection {
     #[default]
@@ -1030,7 +1091,8 @@ pub enum GlideDirection {
     Down,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct ZoomSegment {
     pub start: f64,
@@ -1057,14 +1119,16 @@ impl ZoomSegment {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum ZoomMode {
     Auto,
     Manual { x: f32, y: f32 },
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum MaskKind {
     Sensitive,
@@ -1089,14 +1153,16 @@ pub fn mask_effect_contract() -> &'static MaskEffectContract {
     &MASK_EFFECT_CONTRACT
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct MaskScalarKeyframe {
     pub time: f64,
     pub value: f64,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct MaskVectorKeyframe {
     pub time: f64,
@@ -1104,7 +1170,8 @@ pub struct MaskVectorKeyframe {
     pub y: f64,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct MaskKeyframes {
     #[serde(default)]
@@ -1115,7 +1182,8 @@ pub struct MaskKeyframes {
     pub intensity: Vec<MaskScalarKeyframe>,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct MaskSegment {
     pub start: f64,
@@ -1159,7 +1227,10 @@ impl MaskSegment {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum TextAlign {
     Left,
@@ -1168,7 +1239,10 @@ pub enum TextAlign {
     Right,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum TextAnimation {
     None,
@@ -1189,7 +1263,10 @@ pub enum TextAnimation {
 }
 
 /// How a text segment's optional background hugs the text.
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum TextBackgroundStyle {
     /// One rounded rectangle behind the whole block.
@@ -1203,7 +1280,10 @@ pub enum TextBackgroundStyle {
 
 /// How a text segment shares the frame with the display recording. The
 /// variants name where the TEXT sits; the display card makes room for it.
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum TextLayout {
     /// Text draws over the untouched display (the original behavior).
@@ -1217,7 +1297,8 @@ pub enum TextLayout {
     SplitRight,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct TextSegment {
     pub start: f64,
@@ -1345,7 +1426,8 @@ impl TextSegment {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum SceneMode {
     #[default]
@@ -1359,7 +1441,8 @@ pub enum SceneMode {
     Floating,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SplitLayout {
     pub screen_zoom: f64,
@@ -1383,7 +1466,8 @@ fn default_scene_transition() -> f64 {
     0.3
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneSegment {
     pub start: f64,
@@ -1412,7 +1496,8 @@ fn default_camera3d_transition() -> f64 {
 /// screen); `fov` is the vertical field of view with no size compensation, so
 /// apparent size ∝ 1 / (zoom · tan(fov/2)). `pan_x`/`pan_y` truck the camera in
 /// its own plane (world units; +x moves the subject right, +y up).
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct Camera3DProperties {
     /// Camera orbit pitch.
@@ -1467,7 +1552,10 @@ impl Default for Camera3DProperties {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum Camera3DBlurMode {
     #[default]
@@ -1481,7 +1569,8 @@ pub enum Camera3DBlurMode {
 /// is active (a UV-mask variable blur, not a depth-of-field). `strength` is a
 /// blur radius in pixels at 1080p output height; the renderer scales it with
 /// output size so preview and export match.
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct Camera3DBlur {
     #[serde(default)]
@@ -1550,7 +1639,8 @@ impl Default for Camera3DBlur {
 /// P1 comes from the left keyframe's `out_easing` and P2 from the right one's
 /// `in_easing` (a split-handle model). Absent handles default to cubic
 /// ease-in-out: P1 [0.65, 0], P2 [0.35, 1].
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct Camera3DKeyframe {
     /// Seconds relative to the segment start.
@@ -1567,7 +1657,8 @@ pub struct Camera3DKeyframe {
 /// Per-property keyframe tracks. A property with an empty track holds the
 /// segment's base value; each track holds independently before its first and
 /// after its last keyframe.
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct Camera3DTracks {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1628,7 +1719,8 @@ impl Camera3DTracks {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct Camera3DSegment {
     pub start: f64,
@@ -1662,7 +1754,8 @@ impl Camera3DSegment {
 /// these segments live in output/timeline time exactly like zoom/text/mask
 /// segments. `path` is resolved relative to the project directory so projects
 /// stay portable when moved.
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioTrackSegment {
     pub start: f64,
@@ -1695,7 +1788,8 @@ impl AudioTrackSegment {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct StyleOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1708,7 +1802,8 @@ pub struct StyleOverrides {
     pub camera_only_padding: Option<f64>,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct StyleSegment {
     pub start: f64,
@@ -1738,7 +1833,8 @@ impl StyleSegment {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ImageSegment {
     pub start: f64,
@@ -1799,7 +1895,10 @@ pub const MIN_CLIP_TRANSITION_DURATION: f64 = 0.05;
 /// (and to fade back in before leaving the hidden run).
 pub const CLIP_CURSOR_FADE_SECS: f64 = 0.3;
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "kebab-case")]
 pub enum ClipTransitionType {
     #[default]
@@ -1807,7 +1906,8 @@ pub enum ClipTransitionType {
     FadeThroughBlack,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipTransition {
     pub segment_index: u32,
@@ -1837,7 +1937,8 @@ where
     Ok(segments)
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineConfiguration {
     pub segments: Vec<TimelineSegment>,
@@ -1901,7 +2002,8 @@ pub enum TimelineFrameMapping<'a> {
     },
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptionTrackSegment {
     pub id: String,
@@ -2294,7 +2396,8 @@ fn effective_to_output(windows: &[(f64, f64)], effective: f64) -> f64 {
 
 pub const WALLPAPERS_PATH: &str = "assets/backgrounds/macOS";
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptionWord {
     pub text: String,
@@ -2302,7 +2405,8 @@ pub struct CaptionWord {
     pub end: f32,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptionSegment {
     pub id: String,
@@ -2313,7 +2417,10 @@ pub struct CaptionSegment {
     pub words: Vec<CaptionWord>,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "kebab-case")]
 pub enum CaptionPosition {
     TopLeft,
@@ -2325,7 +2432,8 @@ pub enum CaptionPosition {
     BottomRight,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CaptionSettings {
     pub enabled: bool,
@@ -2431,7 +2539,8 @@ impl Default for CaptionSettings {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptionsData {
     pub segments: Vec<CaptionSegment>,
@@ -2446,7 +2555,8 @@ pub struct CaptionsData {
     pub source_timed: bool,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct KeyboardSettings {
     pub enabled: bool,
@@ -2486,13 +2596,15 @@ impl Default for KeyboardSettings {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyboardData {
     pub settings: KeyboardSettings,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct ClipOffsets {
     #[serde(default)]
     pub camera: f32,
@@ -2502,7 +2614,8 @@ pub struct ClipOffsets {
     pub system_audio: f32,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ClipConfiguration {
     pub index: u32,
@@ -2514,7 +2627,8 @@ pub struct ClipConfiguration {
     pub offsets_auto_calculated: bool,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum AnnotationType {
     Arrow,
@@ -2525,7 +2639,8 @@ pub enum AnnotationType {
     Draw,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum MaskType {
     Blur,
@@ -2575,7 +2690,8 @@ impl fmt::Display for AnnotationValidationError {
 
 impl std::error::Error for AnnotationValidationError {}
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct Annotation {
     pub id: String,
@@ -2638,7 +2754,10 @@ impl Annotation {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub enum OverlayTrackKind {
     Mask,
@@ -2646,14 +2765,18 @@ pub enum OverlayTrackKind {
     Text,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(
+    Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, schemars::JsonSchema,
+)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlayTrack {
     pub kind: OverlayTrackKind,
     pub track: u32,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProjectConfiguration {
     pub aspect_ratio: Option<AspectRatio>,
@@ -2811,7 +2934,69 @@ impl ProjectStyleCache {
     }
 }
 
+// Schemars does not emit Serde aliases in input schemas.
+fn expand_input_aliases(schema: &mut serde_json::Value) {
+    match schema {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                expand_input_aliases(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for value in object.values_mut() {
+                expand_input_aliases(value);
+            }
+            if let Some(aliases) = object.remove("x-serde-enum-aliases")
+                && let Some(values) = object
+                    .get_mut("enum")
+                    .and_then(serde_json::Value::as_array_mut)
+                && let Some(aliases) = aliases.as_array()
+            {
+                values.extend(aliases.iter().cloned());
+            }
+            let mut exclusions = Vec::new();
+            if let Some(properties) = object
+                .get_mut("properties")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                let aliases: Vec<_> = properties
+                    .iter()
+                    .flat_map(|(name, field)| {
+                        field
+                            .get("x-serde-aliases")
+                            .and_then(serde_json::Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|alias| {
+                                alias
+                                    .as_str()
+                                    .map(|alias| (name.clone(), alias.to_owned(), field.clone()))
+                            })
+                    })
+                    .collect();
+                for (name, alias, field) in aliases {
+                    properties.insert(alias.clone(), field);
+                    exclusions.push(serde_json::json!({"not": {"required": [name, alias]}}));
+                }
+            }
+            if !exclusions.is_empty() {
+                object.insert("allOf".to_owned(), exclusions.into());
+            }
+        }
+        _ => {}
+    }
+}
+
 impl ProjectConfiguration {
+    pub fn json_schema() -> serde_json::Value {
+        let mut schema = schemars::generate::SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<Self>()
+            .to_value();
+        expand_input_aliases(&mut schema);
+        schema
+    }
+
     pub fn resolved_overlay_order(&self, available: &[OverlayTrack]) -> Vec<OverlayTrack> {
         let mut ordered = Vec::with_capacity(available.len());
         for track in available {

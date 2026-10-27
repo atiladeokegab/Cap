@@ -9,7 +9,8 @@ const KEYBOARD_EVENTS_MAGIC: &[u8; 6] = b"CPKB01";
 #[cfg(test)]
 mod projection_tests;
 
-#[derive(Serialize, Deserialize, Clone, Type, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Type, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyPressEvent {
     pub key: String,
@@ -24,7 +25,8 @@ impl PartialOrd for KeyPressEvent {
     }
 }
 
-#[derive(Default, Serialize, Deserialize, Debug, Clone, Type)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone, Type, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyboardEvents {
     pub presses: Vec<KeyPressEvent>,
@@ -146,14 +148,16 @@ fn modifier_prefix(active_modifiers: &[String]) -> String {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyPressDisplay {
     pub key: String,
     pub time_offset: f64,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyboardTrackSegment {
     pub id: String,

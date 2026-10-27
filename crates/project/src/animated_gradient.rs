@@ -3,14 +3,16 @@ use specta::Type;
 
 use crate::Color;
 
-#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct AnimatedGradientStop {
     pub color: Color,
     pub position: f32,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AnimatedGradientConfig {
     pub color_stops: Vec<AnimatedGradientStop>,
@@ -99,7 +101,8 @@ impl Mood {
 
 macro_rules! parameters {
     ($(($variant:ident, $field:ident, $label:literal, $group:literal, $min:expr, $max:expr, $step:expr)),+ $(,)?) => {
-        #[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        #[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
         #[serde(rename_all = "camelCase")]
         pub enum AnimatedGradientParameter {
             $($variant),+
@@ -202,7 +205,8 @@ parameters![
     ),
 ];
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct AnimatedGradientControl {
     pub key: AnimatedGradientParameter,
@@ -399,7 +403,8 @@ fn stops(palette: [u32; 5]) -> Vec<AnimatedGradientStop> {
         .collect()
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct AnimatedGradientPreset {
     pub id: String,
@@ -408,7 +413,8 @@ pub struct AnimatedGradientPreset {
     pub config: AnimatedGradientConfig,
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AnimatedGradientLibrary {
     pub presets: Vec<AnimatedGradientPreset>,
@@ -433,7 +439,8 @@ impl AnimatedGradientLibrary {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+#[schemars(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct AnimatedGradientCatalog {
     pub default_config: AnimatedGradientConfig,

@@ -60,6 +60,13 @@ pub struct Export {
     /// Output file for a single project, or directory for several
     #[arg(long, short = 'o')]
     output: Option<PathBuf>,
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        requires = "output",
+        conflicts_with_all = ["format", "quality", "optimize_filesize", "settings_json", "progress_json", "completion_json"]
+    )]
+    frame: Option<f64>,
     /// Container to export: mp4 (default), gif, or mov. NOT the output mode — use --json for JSON
     #[arg(long, value_enum)]
     format: Option<ExportFormat>,
@@ -355,6 +362,13 @@ impl Export {
     }
 
     pub async fn run(self, json: bool) -> Result<(), String> {
+        if let Some(time) = self.frame {
+            let result = self.export_frame(time, json).await;
+            return crate::finish_json(
+                crate::resolve_format(json, crate::OutputFormat::Text),
+                result,
+            );
+        }
         // The global --json flag is the agent-facing way to ask for machine-readable output; it
         // implies both NDJSON streams so export matches the rest of the CLI's --json convention.
         // --progress-json / --completion-json remain for the desktop sidecar, which passes them.
@@ -490,6 +504,63 @@ impl Export {
             });
         }
 
+        Ok(())
+    }
+
+    async fn export_frame(self, time: f64, json: bool) -> Result<(), String> {
+        if self.project_paths.len() != 1 {
+            return Err("--frame requires exactly one project".to_string());
+        }
+        let settings = settings_from_flags(&ExportFlags {
+            fps: Some(self.fps.unwrap_or(30)),
+            resolution: self.resolution,
+            ..Default::default()
+        })?;
+        let CliExportSettings::Mp4(settings) = settings else {
+            unreachable!();
+        };
+        let output = self.output.ok_or("--frame requires --output <PNG>")?;
+        ensure_remuxed(self.project_paths[0].clone()).await?;
+        let frame = cap_export::preview::render_still(
+            self.project_paths[0].clone(),
+            time,
+            cap_export::preview::ExportPreviewSettings {
+                fps: settings.fps,
+                resolution_base: settings.resolution_base,
+                compression_bpp: 0.3,
+                cursor_only: false,
+            },
+            self.force_ffmpeg_decoder,
+        )
+        .await
+        .map_err(|error| format!("Frame render error: {error}"))?;
+        let row_bytes = frame.width as usize * 4;
+        let pixels: Vec<u8> = frame
+            .data
+            .chunks(frame.padded_bytes_per_row as usize)
+            .take(frame.height as usize)
+            .flat_map(|row| row[..row_bytes].iter().copied())
+            .collect();
+        image::save_buffer_with_format(
+            &output,
+            &pixels,
+            frame.width,
+            frame.height,
+            image::ColorType::Rgba8,
+            image::ImageFormat::Png,
+        )
+        .map_err(|error| format!("Failed to write frame {}: {error}", output.display()))?;
+        if json {
+            crate::write_json(&serde_json::json!({
+                "path": output,
+                "time": time,
+                "frame": frame.frame_number,
+                "width": frame.width,
+                "height": frame.height,
+            }))?;
+        } else {
+            println!("Exported frame to {}", output.display());
+        }
         Ok(())
     }
 
