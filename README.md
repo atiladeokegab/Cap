@@ -48,15 +48,26 @@ gate's armed instant for segment 0, each resume for later segments), the clock `
 `stopped_at_unix_ms`, wall-clock Unix milliseconds (the gate's armed wall time plus the monotonic
 time since). `take-manifest.json` holds no times.
 
-![C4 context](docs/architecture/c4_context.png)
-![C4 container](docs/architecture/c4_container.png)
-![C4 component](docs/architecture/c4_component.png)
-![C4 code](docs/architecture/c4_code.png)
-
 ### Known limitations
 
 - `schedule_startup_check` (`apps/desktop-gpui/src/updates.rs`): unused since the fork dropped the startup check (main.rs); delete with the updater if it never returns.
 - `set_paused` (`apps/desktop-gpui/src/window_log.rs`): the resume is seen when the actor acknowledges it, a little after the new segment's epoch, so its first titles read slightly late.
+
+## Architecture
+
+C4 diagrams of the fork, drawn by `docs/architecture/c4.py` from the code in this tree: the system in
+its context, the separately running pieces, the desktop app's components, and the fork's files with
+the calls between them, in two parts. Open a diagram for full size. A box or arrow tagged (PR #N) is in that open pull request, not yet on main: PR #22 (stop and go cues, natural auto zoom); PR #26 (pick-ups from the republished shot list); PR #25 (headless `cap record --detach` for the agent recorder).
+
+[![C4 context](docs/architecture/c4_context.png)](docs/architecture/c4_context.png)
+
+[![C4 container](docs/architecture/c4_container.png)](docs/architecture/c4_container.png)
+
+[![C4 component](docs/architecture/c4_component.png)](docs/architecture/c4_component.png)
+
+[![C4 code](docs/architecture/c4_code.png)](docs/architecture/c4_code.png)
+
+[![C4 code_tools](docs/architecture/c4_code_tools.png)](docs/architecture/c4_code_tools.png)
 <!-- fork:end -->
 
 Cap is the open source alternative to Loom. It gives you fast screen recording, polished local editing, instant share links, comments, transcripts, analytics, team workspaces, custom domains, custom S3 storage, and full self-hosting when you need complete control.
