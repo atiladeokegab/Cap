@@ -334,3 +334,64 @@ def test_a_take_keeps_its_zoom_none_after_pickups_are_republished(driver, tmp_pa
     (tmp_path / "shotlist.json").unlink()
     control = zoom(driver, take.take, take=str(tmp_path), shotlist=pickups)
     assert any(overlaps(s, 20.0, 40.0) for s in control), control
+
+
+def marked_take(driver, take_dir, shotlist):
+    driver(
+        "shots",
+        shotlist=shotlist,
+        epoch_ms=0,
+        script=[
+            {"at_ms": 0, "action": "take_start", "take": str(take_dir)},
+            {"at_ms": 0, "action": "next"},
+            {"at_ms": 20000, "action": "next"},
+            {"at_ms": 40000, "action": "next"},
+        ],
+    )
+
+
+RECORDED = {
+    "shots": [
+        {"shot_id": "intro", "title": "Intro", "lines": []},
+        {"shot_id": "demo", "title": "Demo", "lines": [], "zoom": "none"},
+        {"shot_id": "ask", "title": "Ask", "lines": []},
+    ]
+}
+PICKUPS = {"shots": [{"shot_id": "demo", "title": "Demo", "lines": []}]}
+
+
+def test_a_retake_after_pickups_keeps_the_take_list_it_was_marked_against(
+    driver, tmp_path
+):
+    # Reopen a marked take once pick-ups have dropped zoom: none, then press
+    # Retake: the take's list is written once, at its first start, never again.
+    take = Take(60.0)
+    for start in (5.0, 25.0, 45.0):
+        take.clicks(start, start + 4.0, 0.3, box(0.3, 0.3, 0.05))
+    marked_take(driver, tmp_path, RECORDED)
+    snapshot = (tmp_path / "shotlist.json").read_bytes()
+    driver(
+        "shots",
+        shotlist=PICKUPS,
+        take=str(tmp_path),
+        epoch_ms=0,
+        script=[{"at_ms": 50000, "action": "retake"}],
+    )
+    assert (tmp_path / "shotlist.json").read_bytes() == snapshot
+    segments = zoom(driver, take.take, take=str(tmp_path), shotlist=PICKUPS)
+    assert not any(overlaps(s, 20.0, 40.0) for s in segments), segments
+
+
+@pytest.mark.parametrize("live", [PICKUPS, RECORDED, None])
+def test_a_corrupt_take_list_is_refused_never_replaced_by_the_live_one(
+    driver, tmp_path, live
+):
+    # A take list that is there but unreadable is an error, unlike a take from
+    # before takes kept their list: no zoom is generated on a guessed list.
+    take = Take(60.0)
+    for start in (5.0, 25.0, 45.0):
+        take.clicks(start, start + 4.0, 0.3, box(0.3, 0.3, 0.05))
+    marked_take(driver, tmp_path, RECORDED)
+    (tmp_path / "shotlist.json").write_text('{"shots":')
+    with pytest.raises(AssertionError, match="shotlist.json"):
+        zoom(driver, take.take, take=str(tmp_path), shotlist=live)
