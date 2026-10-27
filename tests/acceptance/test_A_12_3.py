@@ -1,8 +1,6 @@
-import re
 import sys
 
 import pytest
-from conftest import source
 
 WINDOW = {"background_alpha", "text_alpha", "click_through", "capture_excluded"}
 
@@ -46,8 +44,9 @@ def prompter(driver, script, tmp_path):
 
 
 def run_then(*steps, until=8000):
-    """Go, the countdown, then Running with `steps` from 5000 ms on."""
+    """Reading, Go, the countdown, then Running with `steps` from 5000 ms on."""
     return [
+        {"at_ms": 50, "action": "tick"},  # Reading, before Go
         {"at_ms": 100, "action": "go"},
         *ticks(200, 5000),
         *steps,
@@ -114,35 +113,22 @@ def test_next_shot_reading_card_is_opaque_and_takes_clicks(driver, tmp_path):
     assert card["window"]["capture_excluded"] is True
 
 
-def body(text, name):
-    match = re.search(rf"pub fn {name}\((.*?)\)[^{{]*\{{(.*?)\n\}}", text, re.DOTALL)
-    assert match, f"platform/windows.rs has no {name}"
-    return match.groups()
-
-
-def test_windows_alpha_and_click_through_helpers_are_real():
-    text = source("apps/desktop-gpui/src/platform/windows.rs")
-    params, alpha = body(text, "set_window_alpha")
-    assert "_native" not in params and "_alpha" not in params, (
-        "set_window_alpha ignores its window or alpha: a stub"
-    )
-    assert "SetLayeredWindowAttributes" in alpha, "no layered-window alpha"
-    params, through = body(text, "set_window_click_through")
-    assert "_native" not in params and "_click_through" not in params, (
-        "set_window_click_through ignores its arguments: a stub"
-    )
-    assert "WS_EX_TRANSPARENT" in through and "WS_EX_LAYERED" in through, (
-        "click-through does not set WS_EX_TRANSPARENT on a layered window"
-    )
-
-
+# Behavioural proof of the Windows helpers in platform/windows.rs: the driver
+# opens a real teleprompter window through them and reports what Windows reads
+# back, not what was requested. It needs a real Windows desktop; on Linux the
+# state-model tests above cover the requested flags.
 @pytest.mark.skipif(sys.platform != "win32", reason="needs a real Windows window")
-def test_on_windows_the_real_window_applies_the_flags(driver, live):
+def test_on_windows_the_real_window_applies_the_flags(driver):
     result = driver("teleprompter_window", phases=["running", "reading"])
     assert result.get("backend") == "windows", result
     run, read = result["running"], result["reading"]
-    assert run["click_through"] is True and read["click_through"] is False
-    assert run["alpha_applied"] == pytest.approx(0.40, abs=0.01), run
-    assert read["alpha_applied"] == pytest.approx(1.0), read
+    # GetLayeredWindowAttributes / GetWindowLongPtrW(GWL_EXSTYLE) read-backs.
+    assert run["alpha_read_back"] == pytest.approx(0.40, abs=0.01), run
+    assert read["alpha_read_back"] == pytest.approx(1.0, abs=0.01), read
+    assert run["ex_style_transparent"] is True, "Running is not click-through"
+    assert read["ex_style_transparent"] is False, "Reading does not take clicks"
+    # WindowFromPoint at the window's centre: the app underneath, or the prompter.
+    assert run["hit_test_passes_through"] is True, run
+    assert read["hit_test_passes_through"] is False, read
     for flags in (run, read):
         assert flags["display_affinity"] == "WDA_EXCLUDEFROMCAPTURE", flags
