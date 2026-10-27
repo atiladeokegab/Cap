@@ -339,6 +339,7 @@ struct ProjectArgs {
 
 #[derive(Subcommand)]
 enum ProjectCommands {
+    #[command(about = "Print the draft-2020-12 project configuration input schema")]
     Schema,
     /// Print project metadata and editor configuration
     Inspect(ProjectTarget),

@@ -62,6 +62,7 @@ pub struct Export {
     output: Option<PathBuf>,
     #[arg(
         long,
+        help = "Write one PNG at this edited output time in seconds",
         allow_hyphen_values = true,
         requires = "output",
         conflicts_with_all = ["format", "quality", "optimize_filesize", "settings_json", "progress_json", "completion_json"]

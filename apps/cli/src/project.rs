@@ -427,6 +427,44 @@ mod tests {
     }
 
     #[test]
+    fn every_declared_serde_alias_is_accepted() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/project/src/configuration.rs"
+        ));
+        for declaration in source.split("alias = \"").skip(1) {
+            let alias = declaration.split('"').next().unwrap();
+            let mut document =
+                serde_json::to_value(cap_project::ProjectConfiguration::default()).unwrap();
+            match alias {
+                "zoom_size" | "advanced_shadow" | "rounding_type" => {
+                    let camera = document["camera"].as_object_mut().unwrap();
+                    let canonical = match alias {
+                        "zoom_size" => "zoomSize",
+                        "advanced_shadow" => "advancedShadow",
+                        _ => "roundingType",
+                    };
+                    let value = camera.remove(canonical).unwrap();
+                    camera.insert(alias.to_owned(), value);
+                }
+                "regular" | "quick" | "rapid" => {
+                    document["cursor"]["animationStyle"] = alias.into()
+                }
+                _ => {
+                    let captions =
+                        serde_json::to_value(cap_project::CaptionsData::default()).unwrap();
+                    assert!(
+                        captions["settings"].get(alias).is_some(),
+                        "unhandled alias: {alias}"
+                    );
+                    document["captions"] = captions;
+                }
+            }
+            parse_config(&document.to_string()).unwrap_or_else(|error| panic!("{alias}: {error}"));
+        }
+    }
+
+    #[test]
     fn schema_rejects_misspelled_fields_and_wrong_types() {
         for (document, field) in [
             (
@@ -450,6 +488,11 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let path = project.path().join("project-config.json");
         std::fs::write(&path, b"original").unwrap();
+        let media = project.path().join("content");
+        std::fs::create_dir(&media).unwrap();
+        std::fs::write(media.join("display.mp4"), b"media must not change").unwrap();
+        std::fs::write(project.path().join("config.tmp"), b"existing temp").unwrap();
+        let before = snapshot(project.path());
         let error = config_set(
             project.path().to_path_buf(),
             r#"{"timeline":{"segments":[],"zoomSegment":[]}}"#,
@@ -458,5 +501,46 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("zoomSegment"));
         assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(snapshot(project.path()), before);
+    }
+
+    #[test]
+    fn valid_partial_set_keeps_defaults_and_preserves_media() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("recording-meta.json"),
+            br#"{"pretty_name":"Test","display":{"path":"display.mp4","fps":30}}"#,
+        )
+        .unwrap();
+        let media = project.path().join("display.mp4");
+        std::fs::write(&media, b"source media").unwrap();
+        config_set(
+            project.path().to_path_buf(),
+            r#"{"background":{"padding":12}}"#,
+            OutputFormat::Text,
+        )
+        .unwrap();
+        let actual = cap_project::ProjectConfiguration::load(project.path()).unwrap();
+        assert_eq!(actual.background.padding, 12.0);
+        assert_eq!(
+            actual.camera.hide,
+            cap_project::ProjectConfiguration::default().camera.hide
+        );
+        assert_eq!(std::fs::read(media).unwrap(), b"source media");
+    }
+
+    fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.push((path.clone(), None));
+                files.extend(snapshot(&path));
+            } else {
+                files.push((path.clone(), Some(std::fs::read(path).unwrap())));
+            }
+        }
+        files.sort();
+        files
     }
 }
