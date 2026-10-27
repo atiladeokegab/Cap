@@ -297,3 +297,31 @@ def test_a_shot_without_budget_estimates_2_s_per_action(driver, tmp_path):
     card = result["views"][0]["card"]
     estimate = math.ceil(14 / MAX_WPS) + 2 * 2
     assert card["budget_label"] == f"~{estimate} s (estimated)"
+
+
+def test_a_run_ending_in_the_countdown_writes_no_mark_for_that_shot(driver, tmp_path):
+    # The mark lands at the resume, not at Go: an eager Go-time mark fails here.
+    before = file_snapshot(tmp_path)
+    first = prompter(
+        driver, [{"at_ms": 100, "action": "go"}, *ticks(200, 1500)], planned(), tmp_path
+    )
+    assert first["views"][-1]["phase"] == "countdown", first["views"][-1]
+    assert first["marks"] == [], "a mark for a shot that never resumed"
+    assert file_snapshot(tmp_path) == before, "shots.json written before the resume"
+
+    take = tmp_path / "second"
+    take.mkdir()
+    script = [
+        {"at_ms": 100, "action": "go"},
+        *ticks(200, 5000, 200),
+        {"at_ms": 5000, "action": "next"},
+        {"at_ms": 5500, "action": "go"},
+        *ticks(5600, 6500),
+    ]
+    second = prompter(driver, script, planned(), take)
+    assert second["views"][-1]["phase"] == "countdown", second["views"][-1]
+    assert [m["shot_id"] for m in second["marks"]] == ["intro"], second["marks"]
+    written = json.loads((take / "shots.json").read_text())
+    assert [m["shot_id"] for m in written] == ["intro"], (
+        "shots.json marks demo before its countdown ended"
+    )

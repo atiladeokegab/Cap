@@ -28,6 +28,13 @@ FIXTURES = {
         [0.0],
         [0.3],
     ),
+    # Exactly 0.5 s after the last accepted press is accepted; a rejected
+    # press (0.3) must not reset the cooldown.
+    "exact_0_5_s_after_a_rejected_press": (
+        [down(0.0), up(0.1), down(0.3), up(0.4), down(0.5), up(0.6)],
+        [0.0, 0.5],
+        [0.3],
+    ),
     # A repeat with no flag: a second key-down with no key-up since the first.
     "down_without_up_between": (
         [down(0.0), down(0.8), up(0.9)],
