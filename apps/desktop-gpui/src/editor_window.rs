@@ -513,22 +513,31 @@ pub fn preflight(path: &std::path::Path) -> Result<ProjectSummary, String> {
 
 const NO_AUTO_ZOOM_CLICKS_MESSAGE: &str =
     "No clicks found to zoom into. Drag across the lane to add one.";
+const DAMAGED_TAKE_LIST_MESSAGE: &str = "This take's shot list is damaged, so no zooms were added.";
 
-fn load_recording_clicks(
+/// What natural zoom reads per recording clip: the cursor file's moves and
+/// clicks, the key presses moved onto the cursor clock, and the spans of the
+/// take's `zoom: none` shots. Errs when the take's own shot list is damaged.
+fn load_recording_activity(
     project_path: &std::path::Path,
-) -> Vec<Vec<cap_project::CursorClickEvent>> {
+) -> Result<Vec<edits::ClipActivity>, String> {
     let Ok(meta) = RecordingMeta::load_for_project(project_path) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let RecordingMetaInner::Studio(studio) = &meta.inner else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let load = |cursor: Option<PathBuf>| {
-        cursor
-            .and_then(|cursor| cap_project::CursorEvents::load_clicks_from_file(&cursor).ok())
-            .unwrap_or_default()
+        let events = cursor
+            .and_then(|cursor| cap_project::CursorEvents::load_from_file(&cursor).ok())
+            .unwrap_or_default();
+        edits::ClipActivity {
+            moves: events.moves,
+            clicks: events.clicks,
+            ..Default::default()
+        }
     };
-    match &**studio {
+    let mut clips: Vec<edits::ClipActivity> = match &**studio {
         StudioRecordingMeta::SingleSegment { segment } => {
             vec![load(
                 segment.cursor.as_ref().map(|cursor| meta.path(cursor)),
@@ -537,9 +546,30 @@ fn load_recording_clicks(
         StudioRecordingMeta::MultipleSegments { inner } => inner
             .segments
             .iter()
-            .map(|segment| load(segment.cursor.as_ref().map(|cursor| meta.path(cursor))))
+            .map(|segment| {
+                let mut clip = load(segment.cursor.as_ref().map(|cursor| meta.path(cursor)));
+                // Key presses count from the capture start, cursor events
+                // from the clip's (`project_keyboard_events`).
+                let offset = segment.latest_start_time().unwrap_or(0.0) * 1000.0;
+                clip.keys_ms = segment
+                    .keyboard_events(&meta)
+                    .presses
+                    .into_iter()
+                    .filter(|press| press.down)
+                    .map(|press| press.time_ms - offset)
+                    .collect();
+                clip
+            })
             .collect(),
+    };
+    for (segment, from, to) in crate::shots::take_zoomless(project_path, || {
+        crate::teleprompter_window::load_shot_list().0
+    })? {
+        if let Some(clip) = clips.get_mut(segment as usize) {
+            clip.zoomless_ms.push((from as f64, to.map(|to| to as f64)));
+        }
     }
+    Ok(clips)
 }
 
 fn has_recorded_cursor_data(meta: &RecordingMeta, studio: &StudioRecordingMeta) -> bool {
@@ -5734,9 +5764,11 @@ impl EditorWindow {
         }
     }
 
-    /// `handleGenerateZoomSegments` (`TL/ZoomTrack.tsx:84-93`): read the
-    /// recorded clicks off the bundle, run the auto-zoom pass, and land the
-    /// result as the zoom track.
+    /// `handleGenerateZoomSegments` (`TL/ZoomTrack.tsx:84-93`), with the
+    /// fork's natural zoom in place of a zoom per click: read the recorded
+    /// activity off the bundle, run the pass, and land the result as the zoom
+    /// track, on a spring that eases each move over 0.75 s unless the project
+    /// already tuned its own.
     pub(crate) fn generate_auto_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.generating_auto_zoom {
             return;
@@ -5745,26 +5777,42 @@ impl EditorWindow {
         self.auto_zoom_message = None;
         cx.notify();
         let path = self.project_path.clone();
-        let amount = f64::from(
-            crate::store::GeneralSettings::load()
-                .default_zoom_amount
-                .unwrap_or(edits::DEFAULT_AUTO_ZOOM_AMOUNT as f32),
-        );
         cx.spawn_in(window, async move |this, cx| {
-            let clicks = cx
+            let activity = cx
                 .background_executor()
-                .spawn(async move { load_recording_clicks(&path) })
+                .spawn(async move { load_recording_activity(&path) })
                 .await;
             this.update_in(cx, |this, window, cx| {
                 this.generating_auto_zoom = false;
                 this.hovering_generate_zoom = false;
+                let activity = match activity {
+                    Ok(activity) => activity,
+                    Err(error) => {
+                        tracing::error!("auto zoom refused: {error}");
+                        this.auto_zoom_message = Some(DAMAGED_TAKE_LIST_MESSAGE);
+                        cx.notify();
+                        return;
+                    }
+                };
                 edits::ensure_timeline(&mut this.project, &this.clip_display_durations);
+                let crop = this
+                    .project
+                    .background
+                    .crop
+                    .as_ref()
+                    .zip(this.display_resolution())
+                    .and_then(|(crop, (width, height))| {
+                        cap_rendering::CursorCropMap::from_crop(
+                            crop,
+                            cap_project::XY::new(width, height),
+                        )
+                    });
                 let segments = this
                     .project
                     .timeline
                     .as_ref()
                     .map_or_else(Vec::new, |timeline| {
-                        edits::generate_zoom_segments_for_timeline(&clicks, timeline, amount)
+                        edits::generate_natural_zoom_for_timeline(&activity, timeline, crop)
                     });
                 if segments.is_empty() {
                     tracing::info!("auto zoom produced no segments");
@@ -5772,9 +5820,15 @@ impl EditorWindow {
                     cx.notify();
                     return;
                 }
-                let applied = this.edit(
-                    |timeline| {
+                let applied = this.edit_timeline_project(
+                    |project| {
+                        let Some(timeline) = project.timeline.as_mut() else {
+                            return false;
+                        };
                         timeline.zoom_segments = segments;
+                        if project.screen_movement_spring == Default::default() {
+                            project.screen_movement_spring = edits::NATURAL_ZOOM_SPRING;
+                        }
                         true
                     },
                     window,
@@ -12741,8 +12795,15 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        let clicks = |root: &std::path::Path| -> Vec<Vec<cap_project::CursorClickEvent>> {
+            load_recording_activity(root)
+                .unwrap()
+                .into_iter()
+                .map(|clip| clip.clicks)
+                .collect()
+        };
         assert_eq!(
-            load_recording_clicks(&root),
+            clicks(&root),
             vec![vec![], vec![], vec![], vec![click.clone()]]
         );
         std::fs::write(
@@ -12754,70 +12815,8 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(load_recording_clicks(&root), vec![vec![click]]);
+        assert_eq!(clicks(&root), vec![vec![click]]);
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    #[ignore = "set CAP_AUTO_ZOOM_BENCH_PROJECT to a disposable recording bundle"]
-    fn auto_zoom_click_loading_benchmark() {
-        let path = PathBuf::from(std::env::var_os("CAP_AUTO_ZOOM_BENCH_PROJECT").unwrap());
-        let meta = RecordingMeta::load_for_project(&path).unwrap();
-        let RecordingMetaInner::Studio(studio) = &meta.inner else {
-            panic!("benchmark requires a Studio recording");
-        };
-        let full_events = || match &**studio {
-            StudioRecordingMeta::SingleSegment { segment } => {
-                let mut events = segment
-                    .cursor
-                    .as_ref()
-                    .map_or_else(cap_project::CursorEvents::default, |cursor| {
-                        cap_project::CursorEvents::load_from_file(&meta.path(cursor)).unwrap()
-                    });
-                let pointer_ids = studio.pointer_cursor_ids();
-                events.stabilize_short_lived_cursor_shapes(
-                    (!pointer_ids.is_empty()).then_some(&pointer_ids),
-                    cap_project::cursor::SHORT_CURSOR_SHAPE_DEBOUNCE_MS,
-                );
-                vec![events.clicks]
-            }
-            StudioRecordingMeta::MultipleSegments { inner } => inner
-                .segments
-                .iter()
-                .map(|segment| segment.cursor_events(&meta).clicks)
-                .collect(),
-        };
-        let times = |clips: Vec<Vec<cap_project::CursorClickEvent>>| {
-            clips
-                .into_iter()
-                .map(|clicks| {
-                    clicks
-                        .into_iter()
-                        .map(|click| click.time_ms)
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(times(full_events()), times(load_recording_clicks(&path)));
-        for round in 0..7 {
-            for full in if round % 2 == 0 {
-                [true, false]
-            } else {
-                [false, true]
-            } {
-                let start = std::time::Instant::now();
-                let clicks = if full {
-                    full_events()
-                } else {
-                    load_recording_clicks(&path)
-                };
-                std::hint::black_box(&clicks);
-                println!(
-                    "round={round} full_events={full} elapsed_ms={:.3}",
-                    start.elapsed().as_secs_f64() * 1000.0
-                );
-            }
-        }
     }
 
     #[test]

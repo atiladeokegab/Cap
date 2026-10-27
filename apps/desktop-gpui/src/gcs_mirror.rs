@@ -20,8 +20,14 @@ struct Running {
 
 static RUNNING: Mutex<Vec<Running>> = Mutex::new(Vec::new());
 
+/// Runs at app start (via `resume_pending`) and at each recording start, so a
+/// `mirror.json` just downloaded is picked up without copying it by hand.
 fn config() -> Option<Config> {
-    Config::load(&crate::store::app_data_dir().join("mirror.json"))
+    let path = crate::store::app_data_dir().join("mirror.json");
+    if let Some(downloads) = dirs::download_dir() {
+        Config::adopt(&path, &downloads);
+    }
+    Config::load(&path)
 }
 
 fn open(config: Config, take: &Path) -> Option<Mirror> {

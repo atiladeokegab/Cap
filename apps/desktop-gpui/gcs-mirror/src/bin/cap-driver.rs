@@ -1,10 +1,16 @@
 //! Test-only adapter for tests/acceptance: one JSON request on stdin
-//! (`op`: sign, scan, stop, resume, shots or windows), one JSON object on stdout.
+//! (`op`: sign, scan, stop, resume, shots, prompter, zoom or windows), one JSON
+//! object on stdout.
 
 // The teleprompter's shot logic, std and serde only, straight from the app.
 #[allow(dead_code)]
 #[path = "../../../src/shots.rs"]
 mod shots;
+
+// The editor's zoom pass, std only, straight from the app.
+#[allow(dead_code)]
+#[path = "../../../src/natural_zoom.rs"]
+mod natural_zoom;
 
 // The window log's change detector and epoch arithmetic, std and serde only, straight from the app.
 #[path = "../../../src/window_log/change.rs"]
@@ -88,33 +94,109 @@ fn mirror(request: &Value) -> Result<Option<Mirror>, String> {
     Ok(Some(mirror))
 }
 
-/// Loads the shot list (inline, or a signed GET of `shotlist_url`), then
-/// plays `script` on an injected clock: the start gate armed at `epoch_ms`,
-/// each step at its `at_ms`. `elapsed_offset_ms` would only skew the bar's
-/// timer, which marks never read.
+/// Loads the shot list (inline, or a signed GET of `shotlist_url` as the
+/// window opens), then plays `script` on an injected clock: the start gate
+/// armed at `epoch_ms` for `take`, each step at its `at_ms`.
+/// `elapsed_offset_ms` would only skew the bar's timer, which marks never
+/// read.
+///
+/// Steps: `next`, `retake`, `pause`, `resume`; `take_start` (follow `take`,
+/// its gate armed at the step, and read the list again), `take_stop`,
+/// `reload` (read it again), and `settle` (let every read in flight land).
+/// Reads run off the script, the way the window's do: a step waits up to
+/// [`READ_WAIT`] for its own read, never for an older one.
 fn shots_op(request: &Value) -> Result<Value, String> {
-    let loaded = match (&request["shotlist"], request["shotlist_url"].as_str()) {
-        (Value::Null, None) => None,
-        (Value::Null, Some(url)) => {
-            Some(fetch_shotlist(request, url).and_then(|b| shots::parse(&b)))
+    let url = request["shotlist_url"].as_str();
+    let mut shots = None;
+    let mut warning = None;
+    let mut reads = shots::Reads::default();
+    // Each read lands with its number and whether a live take started it.
+    type Landed = (u64, bool, Result<shots::ShotList, String>);
+    let (landed_tx, landed) = std::sync::mpsc::channel::<Landed>();
+    let start_read = |reads: &mut shots::Reads, during_take: bool| {
+        let number = reads.start();
+        let (request, url, landed) = (request.clone(), url.map(String::from), landed_tx.clone());
+        std::thread::spawn(move || {
+            let read = url
+                .ok_or_else(|| "no shotlist_url".to_string())
+                .and_then(|url| fetch_shotlist(&request, &url))
+                .and_then(|bytes| shots::parse(&bytes));
+            landed.send((number, during_take, read)).ok();
+        });
+        number
+    };
+    // A landed read: the newest replaces the list, a failed one keeps it.
+    let land = |(number, during_take, read): Landed,
+                reads: &mut shots::Reads,
+                shots: &mut Option<shots::Shots>,
+                warning: &mut Option<String>| {
+        if !reads.land(number) {
+            return;
         }
-        (list, _) => Some(shots::parse(list.to_string().as_bytes())),
+        match read {
+            Ok(list) => {
+                *warning = None;
+                match shots {
+                    Some(shots) => shots.replace(list, during_take),
+                    None => *shots = Some(shots::Shots::new(list)),
+                }
+            }
+            Err(error) => *warning = Some(error.replace('\n', " ")),
+        }
     };
-    let mut shots = match loaded {
-        None => return Ok(json!({ "mode": "free", "marks": [] })),
-        Some(Err(error)) => return Ok(json!({ "mode": "stock", "error": error, "marks": [] })),
-        Some(Ok(list)) => shots::Shots::new(list),
+    // Waits for read `number` (or every read, for `None`) to land.
+    let wait = |number: Option<u64>,
+                reads: &mut shots::Reads,
+                shots: &mut Option<shots::Shots>,
+                warning: &mut Option<String>,
+                in_flight: &mut u64| {
+        let deadline = Instant::now() + READ_WAIT;
+        while *in_flight > 0 {
+            let Ok(read) = landed.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            else {
+                return;
+            };
+            *in_flight -= 1;
+            let landed_number = read.0;
+            land(read, reads, shots, warning);
+            if number == Some(landed_number) {
+                return;
+            }
+        }
     };
+    let mut in_flight = 0;
+    match (&request["shotlist"], url) {
+        (Value::Null, None) => return Ok(json!({ "mode": "free", "marks": [] })),
+        (Value::Null, Some(_)) => {
+            let number = start_read(&mut reads, false);
+            in_flight += 1;
+            wait(
+                Some(number),
+                &mut reads,
+                &mut shots,
+                &mut warning,
+                &mut in_flight,
+            );
+        }
+        (list, _) => match shots::parse(list.to_string().as_bytes()) {
+            Ok(list) => shots = Some(shots::Shots::new(list)),
+            Err(error) => return Ok(json!({ "mode": "stock", "error": error, "marks": [] })),
+        },
+    }
     let base = Instant::now();
     let at = |ms: f64| base + Duration::from_secs_f64(ms.max(0.) / 1000.);
-    let armed = at(request["epoch_ms"].as_f64().unwrap_or(0.));
-    let take = request["take"].as_str().map(PathBuf::from);
+    let mut armed = at(request["epoch_ms"].as_f64().unwrap_or(0.));
+    let mut take = request["take"].as_str().map(PathBuf::from);
     let mut clock = shots::ShotClock::default();
     for step in request["script"].as_array().into_iter().flatten() {
+        while let Ok(read) = landed.try_recv() {
+            in_flight -= 1;
+            land(read, &mut reads, &mut shots, &mut warning);
+        }
         let now = at(step["at_ms"].as_f64().unwrap_or(0.));
         let action = match step["action"].as_str() {
-            Some("next") => shots::Action::Next,
-            Some("retake") => shots::Action::Retake,
+            Some("next") => Some(shots::Action::Next),
+            Some("retake") => Some(shots::Action::Retake),
             Some("pause") => {
                 clock.pause();
                 continue;
@@ -123,20 +205,238 @@ fn shots_op(request: &Value) -> Result<Value, String> {
                 clock.resume(Some(now));
                 continue;
             }
+            Some("take_start") => {
+                take = step["take"].as_str().map(PathBuf::from);
+                (armed, clock) = (now, shots::ShotClock::default());
+                if let Some(shots) = shots.as_mut() {
+                    shots.follow(take.as_deref());
+                }
+                None
+            }
+            Some("take_stop") => {
+                take = None;
+                if let Some(shots) = shots.as_mut() {
+                    shots.follow(None);
+                }
+                continue;
+            }
+            Some("reload") => None,
+            Some("settle") => {
+                wait(None, &mut reads, &mut shots, &mut warning, &mut in_flight);
+                continue;
+            }
             other => return Err(format!("unknown action {other:?}")),
         };
-        if let (Some(take), Some(time)) = (&take, clock.read(Some(armed), now)) {
+        let Some(action) = action else {
+            // take_start and reload: the list is read again.
+            if url.is_none() {
+                continue;
+            }
+            // Reload during a live take; a take's own read at its start is not.
+            let during_take = step["action"] == "reload" && take.is_some();
+            let number = start_read(&mut reads, during_take);
+            in_flight += 1;
+            wait(
+                Some(number),
+                &mut reads,
+                &mut shots,
+                &mut warning,
+                &mut in_flight,
+            );
+            if let (Some(shots), Some(take)) = (shots.as_mut(), take.as_deref()) {
+                shots.follow(Some(take));
+            }
+            continue;
+        };
+        if let (Some(shots), Some(take), Some(time)) =
+            (shots.as_mut(), &take, clock.read(Some(armed), now))
+        {
             shots.mark(action, take, time).map_err(|e| e.to_string())?;
         }
     }
+    // The end of the script settles like `settle` before reporting.
+    wait(None, &mut reads, &mut shots, &mut warning, &mut in_flight);
+    let Some(shots) = shots else {
+        return Ok(json!({ "mode": "stock", "error": warning, "warning": warning, "marks": [] }));
+    };
     // What the teleprompter shows for the shot on screen.
     let shot = shots.current();
     let lines: Vec<&str> = shot.lines.iter().map(|line| line.text.as_str()).collect();
+    let progress = shots.list.progress.as_ref().map(|progress| {
+        let rows: Vec<Value> = progress
+            .rows()
+            .into_iter()
+            .map(|(label, ticked)| json!({ "label": label, "ticked": ticked }))
+            .collect();
+        json!({ "summary": progress.summary(), "rows": rows })
+    });
     Ok(json!({
         "mode": "shots",
         "current": { "shot_id": shot.shot_id, "title": shot.title, "on_screen": shot.on_screen, "lines": lines },
         "marks": shots.marks(),
+        "warning": warning.or_else(|| shots.list.warning.clone()),
+        "progress": progress,
     }))
+}
+
+/// How long a step waits for its own shot-list read before going on.
+const READ_WAIT: Duration = Duration::from_secs(1);
+
+/// The teleprompter's script size by default (`store.rs`).
+const SCRIPT_TEXT_PX: f32 = 30.;
+
+/// The teleprompter between shots, on the same injected clock as `shots`:
+/// `next` and `retake` are the shot keys (Next on a started take holds on the
+/// next shot's card and pauses the recording; pressed again on its card it is
+/// Go), `go` starts the card's 3-2-1, `scroll` reads up to `line` (past the
+/// last: the STOP cue), `tick` only lets time pass. When the 3-2-1 is over the
+/// recording resumes as a new segment with that step as its epoch, and the
+/// held press marks there. One view per step.
+fn prompter_op(request: &Value) -> Result<Value, String> {
+    let script = request["script"].as_array().cloned().unwrap_or_default();
+    let mut shots = match &request["shotlist"] {
+        Value::Null => {
+            let view = json!({
+                "shot_id": null, "line": null, "cue": null,
+                "recording": true, "card": null, "countdown": null,
+            });
+            return Ok(json!({ "mode": "free", "marks": [], "views": vec![view; script.len()] }));
+        }
+        list => shots::Shots::new(shots::parse(list.to_string().as_bytes())?),
+    };
+    let base = Instant::now();
+    let at = |ms: f64| base + Duration::from_secs_f64(ms.max(0.) / 1000.);
+    let armed = at(request["epoch_ms"].as_f64().unwrap_or(0.));
+    let take = request["take"].as_str().map(PathBuf::from);
+    let mut clock = shots::ShotClock::default();
+    let (mut line, mut recording, mut go_at) = (0, true, None::<f64>);
+    let mut views = Vec::new();
+    for step in &script {
+        let ms = step["at_ms"].as_f64().unwrap_or(0.);
+        let mut press = None;
+        match step["action"].as_str() {
+            Some(key @ ("next" | "retake")) => {
+                let action = match key {
+                    "next" => shots::Action::Next,
+                    _ => shots::Action::Retake,
+                };
+                if shots.cue == shots::Cue::Ready(action) {
+                    shots.go();
+                    go_at = Some(ms);
+                } else if shots.hold(action) {
+                    clock.pause();
+                    recording = false;
+                } else {
+                    press = Some(action);
+                }
+            }
+            Some("go") => {
+                if shots.go().is_some() {
+                    go_at = Some(ms);
+                }
+            }
+            Some("scroll") => {
+                line = step["line"].as_u64().unwrap_or(0) as usize;
+                if line >= shots.current().lines.len() {
+                    shots.ended();
+                }
+            }
+            Some("tick") => {}
+            other => return Err(format!("unknown action {other:?}")),
+        }
+        let count = go_at.and_then(|go| shots::countdown((ms - go) as u64));
+        if go_at.is_some() && count.is_none() {
+            go_at = None;
+            clock.resume(Some(at(ms)));
+            recording = true;
+            if let shots::Cue::Countdown(action) = shots.cue {
+                press = Some(action);
+            }
+        }
+        if let (Some(action), Some(take), Some(time)) =
+            (press, &take, clock.read(Some(armed), at(ms)))
+        {
+            shots.mark(action, take, time).map_err(|e| e.to_string())?;
+            line = 0;
+        }
+        let card = shots.upcoming().map(|shot| {
+            json!({
+                "title": shot.title,
+                "on_screen": shot.on_screen,
+                "text_px": SCRIPT_TEXT_PX * shots::CARD_SCALE,
+                "go": count.is_none(),
+            })
+        });
+        views.push(json!({
+            "shot_id": shots.current().shot_id,
+            "line": line,
+            "cue": (shots.cue == shots::Cue::Stop).then_some("stop"),
+            "recording": recording,
+            "card": card,
+            "countdown": count,
+        }));
+    }
+    Ok(json!({ "mode": "shots", "marks": shots.marks(), "views": views }))
+}
+
+/// The editor's zoom pass over one recording, in ms: cursor.json's `moves`
+/// and `clicks` as recorded, `keys` (key-down `{time_ms}`), `duration_ms`;
+/// a `shotlist` with its `marks` (shots.json) turns its `zoom: none` shots
+/// off. With a `take` dir instead of `marks`, the editor's own resolution:
+/// the take's marks against the list recorded with them, `shotlist` only for
+/// a take without one. Ease is the editor's zoom spring's settle time.
+fn zoom_op(request: &Value) -> Result<Value, String> {
+    let number = |value: &Value, field: &str| value[field].as_f64().unwrap_or(f64::NAN);
+    let list = |value: &Value| value.as_array().cloned().unwrap_or_default();
+    let moves: Vec<natural_zoom::Move> = list(&request["moves"])
+        .iter()
+        .map(|m| natural_zoom::Move {
+            time_ms: number(m, "time_ms"),
+            x: number(m, "x"),
+            y: number(m, "y"),
+        })
+        .collect();
+    let clicks: Vec<natural_zoom::Click> = list(&request["clicks"])
+        .iter()
+        .map(|c| natural_zoom::Click {
+            time_ms: number(c, "time_ms"),
+            down: c["down"].as_bool().unwrap_or(true),
+        })
+        .collect();
+    let keys: Vec<f64> = list(&request["keys"])
+        .iter()
+        .filter(|k| k["down"].as_bool().unwrap_or(true))
+        .map(|k| k.as_f64().unwrap_or_else(|| number(k, "time_ms")))
+        .collect();
+    let live = match &request["shotlist"] {
+        Value::Null => None,
+        list => Some(shots::parse(list.to_string().as_bytes())?),
+    };
+    let zoomless = match (request["take"].as_str(), live) {
+        (Some(take), live) => shots::take_zoomless(Path::new(take), || live)?,
+        (None, Some(list)) => {
+            let marks: Vec<shots::ShotMark> =
+                serde_json::from_value(request["marks"].clone()).map_err(|e| e.to_string())?;
+            shots::zoomless(&list, &marks)
+        }
+        (None, None) => Vec::new(),
+    };
+    let quiet: Vec<(f64, f64)> = zoomless
+        .into_iter()
+        .map(|(_, from, to)| (from as f64, to.map_or(f64::INFINITY, |to| to as f64)))
+        .collect();
+    let duration_ms = number(request, "duration_ms");
+    let segments: Vec<Value> =
+        natural_zoom::natural_zoom(&moves, &clicks, &keys, duration_ms, &quiet)
+            .into_iter()
+            .map(|z| {
+                json!({
+                    "start_ms": z.start_ms, "end_ms": z.end_ms, "amount": z.amount,
+                    "ease_ms": natural_zoom::EASE_MS, "x": z.x, "y": z.y,
+                })
+            })
+            .collect();
+    Ok(json!({ "segments": segments }))
 }
 
 fn fetch_shotlist(request: &Value, url: &str) -> Result<Vec<u8>, String> {
@@ -167,6 +467,12 @@ fn run(request: &Value) -> Result<Value, String> {
     }
     if request["op"] == "shots" {
         return shots_op(request);
+    }
+    if request["op"] == "prompter" {
+        return prompter_op(request);
+    }
+    if request["op"] == "zoom" {
+        return zoom_op(request);
     }
     let Some(mut mirror) = mirror(request)? else {
         return Ok(json!({ "enabled": false }));

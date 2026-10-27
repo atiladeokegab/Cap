@@ -985,7 +985,7 @@ fn mark_shot(action: crate::shots::Action, cx: &mut App) {
     };
     handle
         .update(cx, |view, window, cx| {
-            view.mark_shot(action, cx);
+            view.mark_shot(action, window, cx);
             window.refresh();
         })
         .ok();

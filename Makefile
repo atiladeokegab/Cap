@@ -9,7 +9,7 @@ GPUI := apps/desktop-gpui
 TOOLCHAIN := 1.95.0
 NATIVE_LIBS := $(CURDIR)/target/native-deps/lib:$(CURDIR)/target/debug
 
-.PHONY: check setup driver cli
+.PHONY: check setup driver cli cli-release
 
 # The test-only mirror adapter tests/acceptance drives (CAP_ACCEPTANCE_DRIVER).
 driver:
@@ -21,7 +21,12 @@ driver:
 cli:
 	cargo +$(TOOLCHAIN) build --offline --locked -p cap --bin cap
 
-check: driver cli
+# The release cap CLI tests/acceptance records with (CAP_RELEASE_CLI): no LD_LIBRARY_PATH, as its
+# rpath $ORIGIN finds the ffmpeg 7 libraries `make setup` copies beside it into target/release.
+cli-release:
+	cargo +$(TOOLCHAIN) build --release --offline --locked -p cap --bin cap
+
+check: driver cli cli-release
 	cd $(GPUI) && cargo +$(TOOLCHAIN) test --offline --locked -p cap-gcs-mirror
 	cd $(GPUI) && LD_LIBRARY_PATH="$(NATIVE_LIBS)" xvfb-run -a --server-args="-screen 0 1920x1080x24 -noreset" \
 		cargo +$(TOOLCHAIN) test --offline --locked --bin cap-gpui
