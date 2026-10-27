@@ -339,6 +339,8 @@ struct ProjectArgs {
 
 #[derive(Subcommand)]
 enum ProjectCommands {
+    #[command(about = "Print the draft-2020-12 project configuration input schema")]
+    Schema,
     /// Print project metadata and editor configuration
     Inspect(ProjectTarget),
     /// Verify a project's metadata and expected media files exist
@@ -745,6 +747,7 @@ impl TargetsArgs {
 impl ProjectArgs {
     fn run(self, json: bool) -> Result<(), String> {
         match self.command {
+            ProjectCommands::Schema => project::schema(),
             // validate emits its own structured report (incl. JSON errors), so it is not wrapped.
             ProjectCommands::Validate(args) => {
                 project::validate(args.project_path, resolve_format(json, args.format))

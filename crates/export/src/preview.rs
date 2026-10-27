@@ -109,18 +109,14 @@ struct PreviewSegment<'a> {
     cursor: &'a CursorEvents,
 }
 
-async fn render_preview_with_base(
-    exporter_base: ExporterBase,
-    frame_time: f64,
-    settings: ExportPreviewSettings,
-) -> Result<ExportPreviewResult, ExportError> {
+fn source_from_exporter(exporter_base: &ExporterBase) -> PreviewSource<'_> {
     let total_duration = cap_rendering::get_duration(
         &exporter_base.recordings,
         &exporter_base.recording_meta,
         &exporter_base.studio_meta,
         &exporter_base.project_config,
     );
-    let source = PreviewSource {
+    PreviewSource {
         project_config: &exporter_base.project_config,
         render_constants: &exporter_base.render_constants,
         segments: exporter_base
@@ -133,8 +129,48 @@ async fn render_preview_with_base(
             .collect(),
         total_duration,
         layers_cache: None,
-    };
-    render_preview_frame(source, frame_time, settings).await
+    }
+}
+
+async fn render_preview_with_base(
+    exporter_base: ExporterBase,
+    frame_time: f64,
+    settings: ExportPreviewSettings,
+) -> Result<ExportPreviewResult, ExportError> {
+    render_preview_frame(source_from_exporter(&exporter_base), frame_time, settings).await
+}
+
+pub async fn render_still(
+    project_path: PathBuf,
+    frame_time: f64,
+    settings: ExportPreviewSettings,
+    force_ffmpeg_decoder: bool,
+) -> Result<RenderedFrame, ExportError> {
+    let exporter_base = ExporterBase::builder(project_path)
+        .with_force_ffmpeg_decoder(force_ffmpeg_decoder)
+        .build_video_only()
+        .await
+        .map_err(|error| ExportError::Other(format!("Exporter build error: {error}")))?;
+    let source = source_from_exporter(&exporter_base);
+    validate_frame_time(frame_time, source.total_duration, settings.fps)?;
+    let (frame_number, frame_time) = still_frame_sample(frame_time, settings.fps);
+    let (frame, _) = render_source_frame(source, frame_time, frame_number, settings).await?;
+    Ok(frame)
+}
+
+fn still_frame_sample(time: f64, fps: u32) -> (u32, f64) {
+    let frame = (time * f64::from(fps) + 1e-6).floor() as u32;
+    (frame, f64::from(frame) / f64::from(fps))
+}
+
+fn validate_frame_time(time: f64, duration: f64, fps: u32) -> Result<(), ExportError> {
+    let last = ((duration * f64::from(fps)).ceil() - 1.0) / f64::from(fps);
+    if fps == 0 || !time.is_finite() || time < 0.0 || time > last {
+        return Err(ExportError::Other(format!(
+            "Frame time {time} is outside the valid range [0, {last}] seconds"
+        )));
+    }
+    Ok(())
 }
 
 /// Render the preview through an open editor's decoders and GPU pipelines
@@ -213,11 +249,12 @@ impl Drop for EditorPreviewGuard<'_> {
     }
 }
 
-async fn render_preview_frame(
+async fn render_source_frame(
     source: PreviewSource<'_>,
     frame_time: f64,
+    frame_number: u32,
     settings: ExportPreviewSettings,
-) -> Result<ExportPreviewResult, ExportError> {
+) -> Result<(RenderedFrame, f64), ExportError> {
     let PreviewSource {
         project_config,
         render_constants,
@@ -266,8 +303,6 @@ async fn render_preview_frame(
         )
         .await
         .ok_or_else(|| ExportError::Other("Failed to decode frame".to_string()))?;
-
-    let frame_number = (frame_time * settings.fps as f64).floor() as u32;
 
     let mut zoom_timeline = ZoomTransformTimeline::from_project_for_clip(
         project_config,
@@ -401,6 +436,23 @@ async fn render_preview_frame(
     };
 
     let frame_render_time_ms = render_start.elapsed().as_secs_f64() * 1000.0;
+    if let Some(cache) = layers_cache
+        && let Ok(mut guard) = cache.lock()
+    {
+        *guard = Some(layers);
+    }
+    Ok((frame, frame_render_time_ms))
+}
+
+async fn render_preview_frame(
+    source: PreviewSource<'_>,
+    frame_time: f64,
+    settings: ExportPreviewSettings,
+) -> Result<ExportPreviewResult, ExportError> {
+    let total_duration = source.total_duration;
+    let frame_number = (frame_time * f64::from(settings.fps)).floor() as u32;
+    let (frame, frame_render_time_ms) =
+        render_source_frame(source, frame_time, frame_number, settings).await?;
     let width = frame.width;
     let height = frame.height;
 
@@ -422,12 +474,6 @@ async fn render_preview_frame(
         let encoder_efficiency = 0.5;
         (total_bitrate * encoder_efficiency * duration_seconds) / (8.0 * 1024.0 * 1024.0)
     };
-
-    if let Some(cache) = layers_cache
-        && let Ok(mut guard) = cache.lock()
-    {
-        *guard = Some(layers);
-    }
 
     Ok(ExportPreviewResult {
         jpeg_base64: STANDARD.encode(&jpeg_buffer),
@@ -504,6 +550,32 @@ fn encode_preview_jpeg(frame: &RenderedFrame, quality: u8) -> Result<Vec<u8>, Ex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn still_frame_index_is_preserved_when_its_time_rounds_below_the_boundary() {
+        for (time, fps, expected) in [
+            (4.1, 30, 123),
+            (4.1, 60, 246),
+            (61.7, 30, 1851),
+            (0.04, 30, 1),
+        ] {
+            let (frame, sample_time) = still_frame_sample(time, fps);
+            assert_eq!(frame, expected);
+            assert_eq!(sample_time, f64::from(expected) / f64::from(fps));
+        }
+    }
+
+    #[test]
+    fn still_time_must_be_finite_and_inside_the_output_timeline() {
+        validate_frame_time(1.0, 1.01, 30).unwrap();
+        for time in [0.0, 1.25, 10.0 - 1.0 / 30.0] {
+            validate_frame_time(time, 10.0, 30).unwrap();
+        }
+        for time in [-1.0, 10.0 - 1.0 / 60.0, 10.0, 11.0, f64::NAN, f64::INFINITY] {
+            let error = validate_frame_time(time, 10.0, 30).unwrap_err().to_string();
+            assert!(error.contains("valid range [0, 9.966"));
+        }
+    }
 
     fn frame(width: u32, height: u32, stride: usize, mut state: u64) -> RenderedFrame {
         let mut data = vec![0xa5; stride * height as usize];

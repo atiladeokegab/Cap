@@ -48,6 +48,7 @@ cpal = { workspace = true }
 winit = "0.30"
 softbuffer = "0.4"
 workspace-hack = { version = "0.1", path = "../../crates/workspace-hack" }
+jsonschema = { version = "0.60.2", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
