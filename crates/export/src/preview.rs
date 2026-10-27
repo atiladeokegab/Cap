@@ -153,10 +153,14 @@ pub async fn render_still(
         .map_err(|error| ExportError::Other(format!("Exporter build error: {error}")))?;
     let source = source_from_exporter(&exporter_base);
     validate_frame_time(frame_time, source.total_duration, settings.fps)?;
-    let frame_time =
-        (frame_time * f64::from(settings.fps) + 1e-6).floor() / f64::from(settings.fps);
-    let (frame, _) = render_source_frame(source, frame_time, settings).await?;
+    let (frame_number, frame_time) = still_frame_sample(frame_time, settings.fps);
+    let (frame, _) = render_source_frame(source, frame_time, frame_number, settings).await?;
     Ok(frame)
+}
+
+fn still_frame_sample(time: f64, fps: u32) -> (u32, f64) {
+    let frame = (time * f64::from(fps) + 1e-6).floor() as u32;
+    (frame, f64::from(frame) / f64::from(fps))
 }
 
 fn validate_frame_time(time: f64, duration: f64, fps: u32) -> Result<(), ExportError> {
@@ -248,6 +252,7 @@ impl Drop for EditorPreviewGuard<'_> {
 async fn render_source_frame(
     source: PreviewSource<'_>,
     frame_time: f64,
+    frame_number: u32,
     settings: ExportPreviewSettings,
 ) -> Result<(RenderedFrame, f64), ExportError> {
     let PreviewSource {
@@ -298,8 +303,6 @@ async fn render_source_frame(
         )
         .await
         .ok_or_else(|| ExportError::Other("Failed to decode frame".to_string()))?;
-
-    let frame_number = (frame_time * settings.fps as f64).floor() as u32;
 
     let mut zoom_timeline = ZoomTransformTimeline::from_project_for_clip(
         project_config,
@@ -447,7 +450,9 @@ async fn render_preview_frame(
     settings: ExportPreviewSettings,
 ) -> Result<ExportPreviewResult, ExportError> {
     let total_duration = source.total_duration;
-    let (frame, frame_render_time_ms) = render_source_frame(source, frame_time, settings).await?;
+    let frame_number = (frame_time * f64::from(settings.fps)).floor() as u32;
+    let (frame, frame_render_time_ms) =
+        render_source_frame(source, frame_time, frame_number, settings).await?;
     let width = frame.width;
     let height = frame.height;
 
@@ -545,6 +550,20 @@ fn encode_preview_jpeg(frame: &RenderedFrame, quality: u8) -> Result<Vec<u8>, Ex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn still_frame_index_is_preserved_when_its_time_rounds_below_the_boundary() {
+        for (time, fps, expected) in [
+            (4.1, 30, 123),
+            (4.1, 60, 246),
+            (61.7, 30, 1851),
+            (0.04, 30, 1),
+        ] {
+            let (frame, sample_time) = still_frame_sample(time, fps);
+            assert_eq!(frame, expected);
+            assert_eq!(sample_time, f64::from(expected) / f64::from(fps));
+        }
+    }
 
     #[test]
     fn still_time_must_be_finite_and_inside_the_output_timeline() {
