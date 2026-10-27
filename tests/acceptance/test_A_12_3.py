@@ -114,21 +114,23 @@ def test_next_shot_reading_card_is_opaque_and_takes_clicks(driver, tmp_path):
 
 
 # Behavioural proof of the Windows helpers in platform/windows.rs: the driver
-# opens a real teleprompter window through them and reports what Windows reads
-# back, not what was requested. It needs a real Windows desktop; on Linux the
-# state-model tests above cover the requested flags.
+# opens a real teleprompter window through them and reports what is measured on
+# the composited desktop, never what was requested or a mechanism's readback
+# (a whole-window alpha cannot tell the background from the text). It needs a
+# real Windows desktop; on Linux the state-model tests above cover the flags.
 @pytest.mark.skipif(sys.platform != "win32", reason="needs a real Windows window")
 def test_on_windows_the_real_window_applies_the_flags(driver):
     result = driver("teleprompter_window", phases=["running", "reading"])
     assert result.get("backend") == "windows", result
     run, read = result["running"], result["reading"]
-    # GetLayeredWindowAttributes / GetWindowLongPtrW(GWL_EXSTYLE) read-backs.
-    assert run["alpha_read_back"] == pytest.approx(0.40, abs=0.01), run
-    assert read["alpha_read_back"] == pytest.approx(1.0, abs=0.01), read
-    assert run["ex_style_transparent"] is True, "Running is not click-through"
-    assert read["ex_style_transparent"] is False, "Reading does not take clicks"
+    # Rendered alpha, solved from the window's pixels over a black and a white
+    # backdrop: in a background-only region, and in a glyph region.
+    assert run["background_alpha"] == pytest.approx(0.40, abs=0.03), run
+    assert run["text_alpha"] >= 0.95, "Running text is not at full contrast"
+    assert read["background_alpha"] >= 0.95, "a Reading card is not opaque"
+    assert read["text_alpha"] >= 0.95, read
     # WindowFromPoint at the window's centre: the app underneath, or the prompter.
-    assert run["hit_test_passes_through"] is True, run
-    assert read["hit_test_passes_through"] is False, read
+    assert run["hit_test_passes_through"] is True, "Running is not click-through"
+    assert read["hit_test_passes_through"] is False, "Reading does not take clicks"
     for flags in (run, read):
         assert flags["display_affinity"] == "WDA_EXCLUDEFROMCAPTURE", flags
