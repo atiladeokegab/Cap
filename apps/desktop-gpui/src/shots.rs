@@ -333,23 +333,27 @@ pub fn zoomless(list: &ShotList, marks: &[ShotMark]) -> Vec<(u32, u64, Option<u6
 
 /// [`zoomless`] for a take on disk: its marks against the list recorded
 /// with them. `live` is only asked for a take marked before takes recorded
-/// their list.
+/// their list; a recorded list that is there but unreadable is an error,
+/// never replaced by a guess.
 pub fn take_zoomless(
     take: &Path,
     live: impl FnOnce() -> Option<ShotList>,
-) -> Vec<(u32, u64, Option<u64>)> {
+) -> Result<Vec<(u32, u64, Option<u64>)>, String> {
     let marks: Vec<ShotMark> = std::fs::read(take.join(SHOTS_FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
     if marks.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    std::fs::read(take.join(TAKE_LIST_FILE))
-        .ok()
-        .and_then(|bytes| parse(&bytes).ok())
+    let recorded = match std::fs::read(take.join(TAKE_LIST_FILE)) {
+        Ok(bytes) => Some(parse(&bytes).map_err(|error| format!("the take's {error}"))?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("the take's {TAKE_LIST_FILE}: {error}")),
+    };
+    Ok(recorded
         .or_else(live)
-        .map_or_else(Vec::new, |list| zoomless(&list, &marks))
+        .map_or_else(Vec::new, |list| zoomless(&list, &marks)))
 }
 
 /// The mirror uploads take files while recording: never let it read half.
@@ -521,11 +525,12 @@ impl Shots {
             time_ms,
             retake: action == Action::Retake,
         });
-        // The list first: marks are never on disk without the list they mean.
-        write_whole(
-            &take.join(TAKE_LIST_FILE),
-            &serde_json::to_vec_pretty(&self.list)?,
-        )?;
+        // The list first, once: marks are never on disk without the list they
+        // mean, and a Retake on a reopened take never replaces it.
+        let recorded = take.join(TAKE_LIST_FILE);
+        if !recorded.exists() {
+            write_whole(&recorded, &serde_json::to_vec_pretty(&self.list)?)?;
+        }
         write_whole(
             &take.join(SHOTS_FILE),
             &serde_json::to_vec_pretty(&self.marks)?,
@@ -820,14 +825,25 @@ mod tests {
         let pickups = || {
             Some(parse(br#"{"shots": [{"shot_id": "intro", "title": "I", "lines": []}]}"#).unwrap())
         };
-        assert!(take_zoomless(&take, pickups).is_empty());
+        assert!(take_zoomless(&take, pickups).unwrap().is_empty());
         let mut shots = Shots::new(recorded);
         shots.follow(Some(&take));
         shots.mark(Action::Next, &take, (0, 700)).unwrap();
-        assert_eq!(take_zoomless(&take, pickups), [(0, 700, None)]);
+        assert_eq!(take_zoomless(&take, pickups).unwrap(), [(0, 700, None)]);
+        // Reopened on the pick-ups, a Retake keeps the list the take began with.
+        let mut reopened = Shots::new(pickups().unwrap());
+        reopened.follow(Some(&take));
+        reopened.mark(Action::Retake, &take, (0, 900)).unwrap();
+        assert_eq!(
+            take_zoomless(&take, pickups).unwrap(),
+            [(0, 700, Some(900)), (0, 900, None)]
+        );
+        // A damaged list is refused, never swapped for the live one.
+        std::fs::write(take.join(TAKE_LIST_FILE), b"{\"shots\":").unwrap();
+        assert!(take_zoomless(&take, pickups).is_err());
         // A take from before takes kept their list falls back to the live one.
         std::fs::remove_file(take.join(TAKE_LIST_FILE)).unwrap();
-        assert!(take_zoomless(&take, pickups).is_empty());
+        assert!(take_zoomless(&take, pickups).unwrap().is_empty());
         std::fs::remove_dir_all(&take).unwrap();
     }
 

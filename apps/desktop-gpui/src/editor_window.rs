@@ -513,16 +513,19 @@ pub fn preflight(path: &std::path::Path) -> Result<ProjectSummary, String> {
 
 const NO_AUTO_ZOOM_CLICKS_MESSAGE: &str =
     "No clicks found to zoom into. Drag across the lane to add one.";
+const DAMAGED_TAKE_LIST_MESSAGE: &str = "This take's shot list is damaged, so no zooms were added.";
 
 /// What natural zoom reads per recording clip: the cursor file's moves and
 /// clicks, the key presses moved onto the cursor clock, and the spans of the
-/// take's `zoom: none` shots.
-fn load_recording_activity(project_path: &std::path::Path) -> Vec<edits::ClipActivity> {
+/// take's `zoom: none` shots. Errs when the take's own shot list is damaged.
+fn load_recording_activity(
+    project_path: &std::path::Path,
+) -> Result<Vec<edits::ClipActivity>, String> {
     let Ok(meta) = RecordingMeta::load_for_project(project_path) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let RecordingMetaInner::Studio(studio) = &meta.inner else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let load = |cursor: Option<PathBuf>| {
         let events = cursor
@@ -561,12 +564,12 @@ fn load_recording_activity(project_path: &std::path::Path) -> Vec<edits::ClipAct
     };
     for (segment, from, to) in crate::shots::take_zoomless(project_path, || {
         crate::teleprompter_window::load_shot_list().0
-    }) {
+    })? {
         if let Some(clip) = clips.get_mut(segment as usize) {
             clip.zoomless_ms.push((from as f64, to.map(|to| to as f64)));
         }
     }
-    clips
+    Ok(clips)
 }
 
 fn has_recorded_cursor_data(meta: &RecordingMeta, studio: &StudioRecordingMeta) -> bool {
@@ -5782,6 +5785,15 @@ impl EditorWindow {
             this.update_in(cx, |this, window, cx| {
                 this.generating_auto_zoom = false;
                 this.hovering_generate_zoom = false;
+                let activity = match activity {
+                    Ok(activity) => activity,
+                    Err(error) => {
+                        tracing::error!("auto zoom refused: {error}");
+                        this.auto_zoom_message = Some(DAMAGED_TAKE_LIST_MESSAGE);
+                        cx.notify();
+                        return;
+                    }
+                };
                 edits::ensure_timeline(&mut this.project, &this.clip_display_durations);
                 let crop = this
                     .project
@@ -12785,6 +12797,7 @@ mod tests {
         .unwrap();
         let clicks = |root: &std::path::Path| -> Vec<Vec<cap_project::CursorClickEvent>> {
             load_recording_activity(root)
+                .unwrap()
                 .into_iter()
                 .map(|clip| clip.clicks)
                 .collect()

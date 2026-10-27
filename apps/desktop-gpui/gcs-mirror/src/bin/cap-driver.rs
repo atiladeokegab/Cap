@@ -413,7 +413,7 @@ fn zoom_op(request: &Value) -> Result<Value, String> {
         list => Some(shots::parse(list.to_string().as_bytes())?),
     };
     let zoomless = match (request["take"].as_str(), live) {
-        (Some(take), live) => shots::take_zoomless(Path::new(take), || live),
+        (Some(take), live) => shots::take_zoomless(Path::new(take), || live)?,
         (None, Some(list)) => {
             let marks: Vec<shots::ShotMark> =
                 serde_json::from_value(request["marks"].clone()).map_err(|e| e.to_string())?;
