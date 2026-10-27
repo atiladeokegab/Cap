@@ -58,7 +58,7 @@ time since). `take-manifest.json` holds no times.
 
 C4 diagrams of the fork, drawn by `docs/architecture/c4.py` from the code in this tree: the system in
 its context, the separately running pieces, the desktop app's components, and the fork's files with
-the calls between them, in two parts. Open a diagram for full size. A box or arrow tagged (PR #N) is in that open pull request, not yet on main: PR #22 (stop and go cues, natural auto zoom); PR #26 (pick-ups from the republished shot list); PR #25 (headless `cap record --detach` for the agent recorder).
+the calls between them, in two parts. Open a diagram for full size.
 
 [![C4 context](docs/architecture/c4_context.png)](docs/architecture/c4_context.png)
 

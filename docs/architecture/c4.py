@@ -133,7 +133,7 @@ CALLS = [
     (".github/workflows/verify-recording.yml", "op: \"shots\"", "apps/desktop-gpui/gcs-mirror/src/bin/cap-driver.rs", "shots, scan, stop"),
     (".github/workflows/verify-recording.yml", "events \"$take\" --json", "apps/cli/src/events.rs", "cap events --json"),
     ("apps/desktop-gpui/src/editor_window.rs", "generate_natural_zoom_for_timeline", "apps/desktop-gpui/src/editor_edits.rs", "generate the zoom track", R8),
-    ("apps/desktop-gpui/src/editor_window.rs", "shots::zoomless", "apps/desktop-gpui/src/shots.rs", "zoomless", R8),
+    ("apps/desktop-gpui/src/editor_window.rs", "shots::take_zoomless", "apps/desktop-gpui/src/shots.rs", "take_zoomless", R8),
     ("apps/desktop-gpui/src/editor_edits.rs", "natural_zoom(", "apps/desktop-gpui/src/natural_zoom.rs", "natural_zoom, stock", R8),
     ("apps/desktop-gpui/gcs-mirror/src/bin/cap-driver.rs", "src/natural_zoom.rs", "apps/desktop-gpui/src/natural_zoom.rs", "compiled in by #[path]", R8),
 ]
