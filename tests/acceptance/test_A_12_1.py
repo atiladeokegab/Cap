@@ -150,19 +150,29 @@ def test_keep_back_then_restart_then_send_from_the_recordings_list(studio):
     started = time.time()
     kept = dialog(studio, "keep_back")["send"]
     assert kept["send"] is False, kept
-    decided(kept, started, time.time())
+    kept_at = decided(kept, started, time.time())
+    local = [json.loads(p.read_text()) for p in studio.take.rglob("send.json")]
+    assert local and all(r["send"] is False for r in local), (
+        f"Keep back was not persisted locally as send false: {local}"
+    )
     assert_capture_untouched(studio)
 
     restart(studio)
     _, record = bucket_send(studio)
-    assert record is None or record["send"] is False, "Keep back sent the take"
+    assert record is not None, "the Keep back decision was not uploaded after restart"
+    assert record["send"] is False and record["decided_at"] == kept_at, record
 
+    # Past the 1 s slack, so Send's decided_at cannot be Keep back's.
+    time.sleep(2.5)
     # Send's own upload fails: the worker is gone, so only the durable path remains.
     studio.server.fail_puts = True
     started = time.time()
     sent = dialog(studio, "send", opened_from="recordings_list")["send"]
     first = decided(sent, started, time.time())
     assert sent["send"] is True, sent
+    assert datetime.fromisoformat(first) > datetime.fromisoformat(kept_at), (
+        "Send kept the Keep back time: the first true decision is the Send"
+    )
     studio.server.fail_puts = False
     restart(studio)
     path, record = bucket_send(studio)
@@ -176,7 +186,7 @@ def test_a_repeated_send_is_one_object_with_the_first_decided_at(studio):
     started = time.time()
     first = decided(dialog(studio, "send")["send"], started, time.time())
     restart(studio)
-    time.sleep(1.2)  # a retry on a later second must not move decided_at
+    time.sleep(2.5)  # a retry past the 1 s slack must not move decided_at
     again = dialog(studio, "send", opened_from="recordings_list")["send"]
     assert again["send"] is True and again["decided_at"] == first, again
     back = dialog(studio, "keep_back", opened_from="recordings_list")["send"]
