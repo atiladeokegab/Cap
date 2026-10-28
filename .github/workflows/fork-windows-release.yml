@@ -67,10 +67,6 @@ jobs:
         shell: bash
         run: cargo check --locked -p cap-recording --target "$TARGET"
 
-      - name: Test cap-gcs-mirror
-        shell: bash
-        run: cargo test --locked --manifest-path apps/desktop-gpui/Cargo.toml -p cap-gcs-mirror --target "$TARGET"
-
       - name: Build desktop binaries
         shell: bash
         env:
@@ -124,6 +120,11 @@ jobs:
           name: cap-windows-x64-unsigned
           path: ${{ env.CAP_BUNDLE }}/nsis/*.exe
           if-no-files-found: error
+
+      # After the bundle: it clones ../zed-cap (the gpui path dependency) and installs the gpui toolchain.
+      - name: Test cap-gcs-mirror
+        shell: bash
+        run: cargo +1.95.0 test --locked --manifest-path apps/desktop-gpui/Cargo.toml -p cap-gcs-mirror --target "$TARGET"
 
       - name: Attach installer to a GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
