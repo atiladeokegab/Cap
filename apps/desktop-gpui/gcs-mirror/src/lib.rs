@@ -195,6 +195,9 @@ pub struct Mirror {
     uploaded: HashMap<String, String>,
     /// Bytes of the frozen take in the bucket, counted as each PUT streams.
     sent: Arc<AtomicU64>,
+    /// The highest `sent` published: a failed PUT's bytes drop out of `sent`,
+    /// but the VM reads only a rise as progress, so the beat never goes lower.
+    published: Arc<AtomicU64>,
     progress_every: Duration,
     stall: Duration,
     /// Made on first use, on the thread that uploads, never inside Cap's runtime.
@@ -233,6 +236,7 @@ impl Mirror {
                 .map_err(io::Error::other)?,
             uploaded,
             sent: Arc::new(AtomicU64::new(0)),
+            published: Arc::new(AtomicU64::new(0)),
             progress_every: PROGRESS_EVERY,
             stall: STALL,
             streaming: None,
@@ -350,6 +354,7 @@ impl Mirror {
     fn heartbeat(&self, total: u64) -> mpsc::Sender<()> {
         let (stop, stopped) = mpsc::channel::<()>();
         let (client, sent, every) = (self.client.clone(), self.sent.clone(), self.progress_every);
+        let published = self.published.clone();
         let (config, url) = (self.config.clone(), self.url(PROGRESS));
         std::thread::spawn(move || {
             let Ok(url) = url else { return };
@@ -360,7 +365,8 @@ impl Mirror {
                 service: "s3",
             };
             while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(every) {
-                let body = json!({ "sent": sent.load(Ordering::Relaxed), "total": total });
+                let now = sent.load(Ordering::Relaxed);
+                let body = json!({ "sent": published.fetch_max(now, Ordering::Relaxed).max(now), "total": total });
                 if let Err(error) = request(
                     &client,
                     &signer,

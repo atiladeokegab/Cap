@@ -16,13 +16,24 @@ use std::{
 /// 16 KB per `pace`, as a slow uplink would carry it, and holds its reply
 /// for `slow`, as a large upload would take.
 fn slow_bucket(slow: Duration, pace: Duration) -> (String, Arc<Mutex<Vec<(String, Vec<u8>)>>>) {
+    paced_bucket(slow, pace, false)
+}
+
+/// `slow_bucket`, and with `drop_first` the first camera PUT is cut off
+/// halfway through its body, as a dropped connection would.
+fn paced_bucket(
+    slow: Duration,
+    pace: Duration,
+    drop_first: bool,
+) -> (String, Arc<Mutex<Vec<(String, Vec<u8>)>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(vec![]));
     let log = seen.clone();
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(!drop_first));
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            let log = log.clone();
+            let (log, dropped) = (log.clone(), dropped.clone());
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(stream);
                 let mut line = String::new();
@@ -47,7 +58,14 @@ fn slow_bucket(slow: Duration, pace: Duration) -> (String, Arc<Mutex<Vec<(String
                 }
                 let mut body = vec![0; length];
                 let camera = path.ends_with("/camera.mp4");
-                for chunk in body.chunks_mut(if camera { 16 * 1024 } else { length.max(1) }) {
+                let cut = camera && !dropped.swap(true, std::sync::atomic::Ordering::Relaxed);
+                for (i, chunk) in body
+                    .chunks_mut(if camera { 16 * 1024 } else { length.max(1) })
+                    .enumerate()
+                {
+                    if cut && i * 16 * 1024 >= length / 2 {
+                        return; // the connection drops mid-body
+                    }
                     if reader.read_exact(chunk).is_err() {
                         return; // the client gave up on this PUT
                     }
@@ -210,4 +228,41 @@ fn a_slow_put_that_keeps_moving_outlasts_the_stall() {
         .filter(|(path, _)| path.ends_with("/camera.mp4"))
         .count();
     assert_eq!(cameras, 1, "sent from its first byte again");
+}
+
+#[test]
+fn a_failed_put_never_makes_the_published_progress_go_down() {
+    // The first camera PUT streams its bytes, then the connection drops; the
+    // retry a second later succeeds. `sent` falls back meanwhile, but no beat
+    // may report less than one before it, or the VM sees no progress.
+    let (endpoint, seen) = paced_bucket(Duration::ZERO, Duration::from_millis(40), true);
+    let dir = folder("progress-retry");
+    let segment = dir.join("take/content/segments/segment-0");
+    fs::write(dir.join("take/recording-meta.json"), b"{}").unwrap();
+    fs::write(segment.join("camera.mp4"), vec![2u8; 320 * 1024]).unwrap();
+    let mut mirror = mirror(&dir, &endpoint);
+    mirror.set_progress_every(Duration::from_millis(50));
+    let report = mirror.stop(1, Duration::from_secs(30));
+    assert!(report.drained, "{report:?}");
+
+    let seen = seen.lock().unwrap();
+    let sent: Vec<u64> = seen
+        .iter()
+        .filter(|(path, _)| path.ends_with("/progress.json"))
+        .map(|(_, body)| {
+            serde_json::from_slice::<serde_json::Value>(body).unwrap()["sent"]
+                .as_u64()
+                .unwrap()
+        })
+        .collect();
+    let cameras = seen
+        .iter()
+        .filter(|(path, _)| path.ends_with("/camera.mp4"))
+        .count();
+    assert_eq!(cameras, 1, "the first PUT was cut off, the retry landed");
+    assert!(
+        sent.iter().any(|&n| n > 2),
+        "a beat saw the failed PUT's bytes: {sent:?}"
+    );
+    assert!(sent.windows(2).all(|pair| pair[0] <= pair[1]), "{sent:?}");
 }
