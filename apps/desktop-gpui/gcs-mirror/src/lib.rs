@@ -313,8 +313,11 @@ impl Mirror {
         let mut sidecars = vec![
             self.take.join("shots.json"),
             self.take.join("windows.jsonl"),
+            self.take.join("recording-meta.json"),
+            self.take.join("project-config.json"),
         ];
         for segment in &segments {
+            sidecars.push(segment.join("start-times.json"));
             sidecars.push(segment.join("cursor.json"));
             sidecars.push(segment.join("keyboard.bin"));
         }
