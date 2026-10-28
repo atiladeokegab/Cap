@@ -3519,6 +3519,11 @@ async fn create_segment_pipeline(
                 .with_timestamps(start_time)
                 .with_start_gate(start_gate.clone())
                 .build::<WindowsFragmentedM4SCameraMuxer>(WindowsFragmentedM4SCameraMuxerConfig {
+                    bpp: if matches!(quality, crate::StudioQuality::Compatibility) {
+                        cap_enc_ffmpeg::h264::H264EncoderBuilder::COMPATIBILITY_BPP
+                    } else {
+                        cap_enc_ffmpeg::h264::H264EncoderBuilder::QUALITY_BPP
+                    },
                     shared_pause_state: shared_pause_state.clone(),
                     ..Default::default()
                 })

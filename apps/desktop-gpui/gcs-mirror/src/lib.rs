@@ -313,8 +313,11 @@ impl Mirror {
         let mut sidecars = vec![
             self.take.join("shots.json"),
             self.take.join("windows.jsonl"),
+            self.take.join("recording-meta.json"),
+            self.take.join("project-config.json"),
         ];
         for segment in &segments {
+            sidecars.push(segment.join("start-times.json"));
             sidecars.push(segment.join("cursor.json"));
             sidecars.push(segment.join("keyboard.bin"));
         }
@@ -704,10 +707,12 @@ fn remaining(deadline: Instant) -> Duration {
 }
 
 /// D21's upload order: sidecars, then audio, then screen, then camera.
+/// The prefix match also ranks the unfragmented `display.mp4` and
+/// `camera.mp4` (macOS with a camera) behind the sidecars.
 fn upload_rank(relative: &str) -> u8 {
-    if relative.contains("/display/") {
+    if relative.contains("/display") {
         2
-    } else if relative.contains("/camera/") {
+    } else if relative.contains("/camera") {
         3
     } else if relative.ends_with(".m4a") {
         1
@@ -719,7 +724,8 @@ fn upload_rank(relative: &str) -> u8 {
 /// Fragments and init segments: Cap never rewrites them, so a hard link is a
 /// faithful, free copy that survives the remux deleting the original.
 fn is_media(relative: &str) -> bool {
-    upload_rank(relative) >= 2 && !relative.ends_with(".json")
+    (relative.contains("/display/") || relative.contains("/camera/"))
+        && !relative.ends_with(".json")
 }
 
 fn m4a_files(dir: &Path) -> Vec<PathBuf> {

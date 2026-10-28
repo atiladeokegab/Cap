@@ -119,7 +119,7 @@ impl MakeCapturePipeline for screen_capture::CMSampleBufferCapture {
             let bpp = if ultra {
                 H264EncoderBuilder::ULTRA_BPP
             } else if compatibility {
-                H264EncoderBuilder::QUALITY_BPP * 0.5
+                H264EncoderBuilder::COMPATIBILITY_BPP
             } else {
                 H264EncoderBuilder::QUALITY_BPP
             };
@@ -245,6 +245,7 @@ impl MakeCapturePipeline for screen_capture::Direct3DCapture {
         encoder_preferences: EncoderPreferences,
     ) -> anyhow::Result<OutputPipeline> {
         let ultra = quality == StudioQuality::Ultra;
+        let compatibility = quality == StudioQuality::Compatibility;
 
         if fragmented {
             let fragments_dir = output_path
@@ -254,6 +255,8 @@ impl MakeCapturePipeline for screen_capture::Direct3DCapture {
 
             let bpp = if ultra {
                 H264EncoderBuilder::ULTRA_BPP
+            } else if compatibility {
+                H264EncoderBuilder::COMPATIBILITY_BPP
             } else {
                 H264EncoderBuilder::QUALITY_BPP
             };
