@@ -1776,14 +1776,17 @@ dependencies = [
 name = "cap-gcs-mirror"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "chrono",
  "hex",
  "hmac",
+ "http-body",
  "percent-encoding",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
  "tracing",
 ]
 
