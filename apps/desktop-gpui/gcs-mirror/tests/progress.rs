@@ -12,9 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Like `common::bucket`, but keeps each body and holds the reply to a
-/// camera PUT for `slow`, as a large upload would take.
-fn slow_bucket(slow: Duration) -> (String, Arc<Mutex<Vec<(String, Vec<u8>)>>>) {
+/// Like `common::bucket`, but keeps each body, reads a camera PUT's body
+/// 16 KB per `pace`, as a slow uplink would carry it, and holds its reply
+/// for `slow`, as a large upload would take.
+fn slow_bucket(slow: Duration, pace: Duration) -> (String, Arc<Mutex<Vec<(String, Vec<u8>)>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(vec![]));
@@ -45,8 +46,16 @@ fn slow_bucket(slow: Duration) -> (String, Arc<Mutex<Vec<(String, Vec<u8>)>>>) {
                     }
                 }
                 let mut body = vec![0; length];
-                reader.read_exact(&mut body).unwrap();
-                if path.ends_with("/camera.mp4") {
+                let camera = path.ends_with("/camera.mp4");
+                for chunk in body.chunks_mut(if camera { 16 * 1024 } else { length.max(1) }) {
+                    if reader.read_exact(chunk).is_err() {
+                        return; // the client gave up on this PUT
+                    }
+                    if camera {
+                        std::thread::sleep(pace);
+                    }
+                }
+                if camera {
                     std::thread::sleep(slow);
                 }
                 log.lock().unwrap().push((path, body));
@@ -62,7 +71,7 @@ fn slow_bucket(slow: Duration) -> (String, Arc<Mutex<Vec<(String, Vec<u8>)>>>) {
 
 #[test]
 fn progress_reports_the_bytes_sent_while_a_large_put_is_in_flight() {
-    let (endpoint, seen) = slow_bucket(Duration::from_millis(600));
+    let (endpoint, seen) = slow_bucket(Duration::from_millis(600), Duration::ZERO);
     let dir = folder("progress");
     let segment = dir.join("take/content/segments/segment-0");
     fs::write(dir.join("take/recording-meta.json"), b"{}").unwrap();
@@ -122,7 +131,7 @@ fn progress_reports_the_bytes_sent_while_a_large_put_is_in_flight() {
 
 #[test]
 fn no_progress_is_sent_once_the_drain_has_returned() {
-    let (endpoint, seen) = slow_bucket(Duration::ZERO);
+    let (endpoint, seen) = slow_bucket(Duration::ZERO, Duration::ZERO);
     let dir = folder("progress-quiet");
     fs::write(dir.join("take/recording-meta.json"), b"{}").unwrap();
     let mut mirror = mirror(&dir, &endpoint);
@@ -142,7 +151,7 @@ fn no_progress_is_sent_once_the_drain_has_returned() {
 
 #[test]
 fn a_put_that_outlasts_the_drain_deadline_still_lands_once() {
-    let (endpoint, seen) = slow_bucket(Duration::from_millis(1500));
+    let (endpoint, seen) = slow_bucket(Duration::from_millis(1500), Duration::ZERO);
     let dir = folder("progress-outlasts");
     let segment = dir.join("take/content/segments/segment-0");
     fs::write(dir.join("take/recording-meta.json"), b"{}").unwrap();
@@ -161,11 +170,13 @@ fn a_put_that_outlasts_the_drain_deadline_still_lands_once() {
 
 #[test]
 fn a_put_whose_bytes_stop_moving_fails_at_the_stall_not_the_overall_cap() {
-    let (endpoint, _) = slow_bucket(Duration::from_secs(3600));
+    // The bucket stops reading after the first 16 KB; 16 MB outlasts every
+    // buffer between, so the body still has bytes to give when it stalls.
+    let (endpoint, _) = slow_bucket(Duration::ZERO, Duration::from_secs(3600));
     let dir = folder("progress-stall");
     let segment = dir.join("take/content/segments/segment-0");
     fs::write(dir.join("take/recording-meta.json"), b"{}").unwrap();
-    fs::write(segment.join("camera.mp4"), vec![2u8; 5000]).unwrap();
+    fs::write(segment.join("camera.mp4"), vec![2u8; 16 << 20]).unwrap();
     let mut mirror = mirror(&dir, &endpoint);
     mirror.set_stall(Duration::from_millis(300));
     let start = Instant::now();
@@ -176,4 +187,27 @@ fn a_put_whose_bytes_stop_moving_fails_at_the_stall_not_the_overall_cap() {
         "{:?}",
         start.elapsed()
     );
+}
+
+#[test]
+fn a_slow_put_that_keeps_moving_outlasts_the_stall() {
+    // About 256 KB/s for 6 MB: some 24 s on the wire. A socket wakes its
+    // writer only once a share of its buffer drains, so chunks are taken a
+    // second or two apart; the stall sits above that. The buffered tail
+    // (megabytes on loopback) and the 6 s reply wait take no chunk at all.
+    let (endpoint, seen) = slow_bucket(Duration::from_secs(6), Duration::from_millis(62));
+    let dir = folder("progress-trickle");
+    let segment = dir.join("take/content/segments/segment-0");
+    fs::write(dir.join("take/recording-meta.json"), b"{}").unwrap();
+    fs::write(segment.join("camera.mp4"), vec![2u8; 6 << 20]).unwrap();
+    let mut mirror = mirror(&dir, &endpoint);
+    mirror.set_stall(Duration::from_secs(5));
+    let report = mirror.stop(1, Duration::from_secs(120));
+    assert!(report.drained, "{report:?}");
+    let seen = seen.lock().unwrap();
+    let cameras = seen
+        .iter()
+        .filter(|(path, _)| path.ends_with("/camera.mp4"))
+        .count();
+    assert_eq!(cameras, 1, "sent from its first byte again");
 }

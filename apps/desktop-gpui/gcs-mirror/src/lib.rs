@@ -285,11 +285,13 @@ impl Mirror {
 
     /// PUTs one of the take's own files, counting its bytes into `sent` as the
     /// connection takes them. Fails after `timeout` in all, or once no bytes
-    /// have moved for `stall`: a whole camera.mp4 can need many minutes.
+    /// have moved for `stall` while the body still has bytes to give: a whole
+    /// camera.mp4 can need many minutes. Its buffered tail and the response
+    /// wait move no chunk, so only `timeout` bounds them.
     fn put_counted(&mut self, key: &str, body: Vec<u8>, timeout: Duration) -> Result<(), String> {
         let url = self.url(key)?;
         let headers = signed(&self.signer(), "PUT", &url, &body)?;
-        let moved = Arc::new(Mutex::new(Instant::now()));
+        let moved = Arc::new(Mutex::new(Some(Instant::now())));
         let length = body.len();
         let body = Counted {
             body: body.into(),
@@ -329,7 +331,12 @@ impl Mirror {
                     Ok(Ok((status, _))) if status.is_success() => return Ok(()),
                     Ok(Ok((status, _))) => return Err(format!("PUT {}: {status}", url.path())),
                     Ok(Err(error)) => return Err(error.to_string()),
-                    Err(_) if moved.lock().unwrap().elapsed() >= stall => {
+                    Err(_)
+                        if moved
+                            .lock()
+                            .unwrap()
+                            .is_some_and(|at| at.elapsed() >= stall) =>
+                    {
                         return Err(format!("PUT {}: no bytes moved for {stall:?}", url.path()));
                     }
                     Err(_) => {}
@@ -848,7 +855,8 @@ fn signed(
 struct Counted {
     body: bytes::Bytes,
     sent: Arc<AtomicU64>,
-    moved: Arc<Mutex<Instant>>,
+    /// `None` once the last chunk is taken: no stall applies after that.
+    moved: Arc<Mutex<Option<Instant>>>,
 }
 
 impl http_body::Body for Counted {
@@ -865,7 +873,7 @@ impl http_body::Body for Counted {
         let take = self.body.len().min(64 * 1024);
         let chunk = self.body.split_to(take);
         self.sent.fetch_add(chunk.len() as u64, Ordering::Relaxed);
-        *self.moved.lock().unwrap() = Instant::now();
+        *self.moved.lock().unwrap() = (!self.body.is_empty()).then(Instant::now);
         Poll::Ready(Some(Ok(http_body::Frame::data(chunk))))
     }
 
