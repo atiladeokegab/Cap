@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
@@ -34,6 +34,10 @@ const AUDIO_DELTA: u64 = 256 * 1024;
 const STOP: &str = "stop.json";
 const MANIFEST: &str = "take-manifest.json";
 const LEDGER: &str = "uploaded.jsonl";
+/// Bytes sent of the frozen take, PUT while it drains so the VM can tell a
+/// slow upload from a dead one. Never in the ledger, `stop.json` or the manifest.
+const PROGRESS: &str = "progress.json";
+const PROGRESS_EVERY: Duration = Duration::from_secs(15);
 /// Written instead of `stop.json` when the freeze fails.
 const FAILED: &str = "mirror-failed.json";
 
@@ -182,6 +186,9 @@ pub struct Mirror {
     client: Client,
     /// Object name under `prefix` -> SHA-256 of the accepted body.
     uploaded: HashMap<String, String>,
+    /// Bytes of the frozen take in the bucket, counted as each PUT streams.
+    sent: Arc<AtomicU64>,
+    progress_every: Duration,
 }
 
 impl Mirror {
@@ -215,11 +222,26 @@ impl Mirror {
                 .build()
                 .map_err(io::Error::other)?,
             uploaded,
+            sent: Arc::new(AtomicU64::new(0)),
+            progress_every: PROGRESS_EVERY,
         })
     }
 
     pub fn set_endpoint(&mut self, endpoint: &str) {
         self.endpoint = endpoint.trim_end_matches('/').to_string();
+    }
+
+    pub fn set_progress_every(&mut self, every: Duration) {
+        self.progress_every = every;
+    }
+
+    fn signer(&self) -> sigv4::Key<'_> {
+        sigv4::Key {
+            access_key: &self.config.access_key,
+            secret_key: &self.config.secret_key,
+            region: &self.config.region,
+            service: "s3",
+        }
     }
 
     fn url(&self, key: &str) -> Result<Url, String> {
@@ -235,20 +257,47 @@ impl Mirror {
         body: Vec<u8>,
         timeout: Duration,
     ) -> Result<Vec<u8>, String> {
-        let signer = sigv4::Key {
-            access_key: &self.config.access_key,
-            secret_key: &self.config.secret_key,
-            region: &self.config.region,
-            service: "s3",
-        };
-        request(
+        send_counted(
             &self.client,
-            &signer,
+            &self.signer(),
             method,
             &self.url(key)?,
             body,
             timeout,
+            // only the take's own files count as progress
+            (key != STOP && key != MANIFEST).then_some(&self.sent),
         )
+    }
+
+    /// PUTs `progress.json` every `progress_every` until the returned sender
+    /// drops; the first one after `stop.json`, so it never leads the take.
+    fn heartbeat(&self, total: u64) -> mpsc::Sender<()> {
+        let (stop, stopped) = mpsc::channel::<()>();
+        let (client, sent, every) = (self.client.clone(), self.sent.clone(), self.progress_every);
+        let (config, url) = (self.config.clone(), self.url(PROGRESS));
+        std::thread::spawn(move || {
+            let Ok(url) = url else { return };
+            let signer = sigv4::Key {
+                access_key: &config.access_key,
+                secret_key: &config.secret_key,
+                region: &config.region,
+                service: "s3",
+            };
+            while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(every) {
+                let body = json!({ "sent": sent.load(Ordering::Relaxed), "total": total });
+                if let Err(error) = request(
+                    &client,
+                    &signer,
+                    "PUT",
+                    &url,
+                    body.to_string().into_bytes(),
+                    every,
+                ) {
+                    tracing::warn!(%error, "Progress upload failed");
+                }
+            }
+        });
+        stop
     }
 
     pub fn get(&self, key: &str) -> Result<Vec<u8>, String> {
@@ -483,9 +532,17 @@ impl Mirror {
         }
         let outbox = fs::canonicalize(&self.outbox).map_err(|e| format!("outbox: {e}"))?;
         let stop_sha = sigv4::sha256_hex(&stop);
+        self.sent.store(0, Ordering::Relaxed);
+        let _beating = self.heartbeat(expected.iter().map(|file| file.size).sum());
         let mut backoff = Duration::from_secs(1);
         loop {
             let mut failed = false;
+            // Counted up front, so a retry pass never reports fewer bytes than the last.
+            let mut done: u64 = expected
+                .iter()
+                .filter(|file| self.uploaded.get(&file.path) == Some(&file.sha256))
+                .map(|file| file.size)
+                .sum();
             let timeout = deadline.map_or(Duration::from_secs(120), remaining);
             if let Err(error) = self.put_hashed(STOP, stop.clone(), stop_sha.clone(), timeout) {
                 tracing::warn!(%error, "Upload failed; retrying");
@@ -501,11 +558,16 @@ impl Mirror {
                 }
                 let body = read_frozen(&outbox, file)?;
                 let timeout = deadline.map_or(Duration::from_secs(120), remaining);
-                if let Err(error) = self.put_hashed(&file.path, body, file.sha256.clone(), timeout)
-                {
-                    tracing::warn!(%error, "Upload failed; retrying");
-                    failed = true;
+                // A failed PUT's streamed bytes do not count.
+                self.sent.store(done, Ordering::Relaxed);
+                match self.put_hashed(&file.path, body, file.sha256.clone(), timeout) {
+                    Ok(_) => done += file.size,
+                    Err(error) => {
+                        tracing::warn!(%error, "Upload failed; retrying");
+                        failed = true;
+                    }
                 }
+                self.sent.store(done, Ordering::Relaxed);
             }
             if !failed {
                 let manifest = json!({
@@ -663,6 +725,32 @@ pub fn request(
     body: Vec<u8>,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
+    send_counted(client, signer, method, url, body, timeout, None)
+}
+
+/// A request body that adds each byte read from it to `sent`.
+struct Counted {
+    body: io::Cursor<Vec<u8>>,
+    sent: Arc<AtomicU64>,
+}
+
+impl Read for Counted {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.body.read(buf)?;
+        self.sent.fetch_add(read as u64, Ordering::Relaxed);
+        Ok(read)
+    }
+}
+
+fn send_counted(
+    client: &Client,
+    signer: &sigv4::Key,
+    method: &str,
+    url: &Url,
+    body: Vec<u8>,
+    timeout: Duration,
+    sent: Option<&Arc<AtomicU64>>,
+) -> Result<Vec<u8>, String> {
     let host = match url.port() {
         Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
         None => url.host_str().unwrap_or_default().to_string(),
@@ -681,7 +769,17 @@ pub fn request(
     let mut request = client
         .request(method.parse().map_err(|_| "bad method")?, url.clone())
         .timeout(timeout)
-        .body(body);
+        .body(match sent {
+            Some(sent) => {
+                let length = body.len() as u64;
+                let body = Counted {
+                    body: io::Cursor::new(body),
+                    sent: sent.clone(),
+                };
+                reqwest::blocking::Body::sized(body, length)
+            }
+            None => body.into(),
+        });
     for (name, value) in &headers {
         request = request.header(name, value);
     }
