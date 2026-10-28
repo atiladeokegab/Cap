@@ -119,8 +119,7 @@ impl MakeCapturePipeline for screen_capture::CMSampleBufferCapture {
             let bpp = if ultra {
                 H264EncoderBuilder::ULTRA_BPP
             } else if compatibility {
-                // About 4.8 Mbit/s at 1600x1000, so a 5 Mbit/s venue uplink keeps pace.
-                H264EncoderBuilder::QUALITY_BPP / 3.0
+                H264EncoderBuilder::COMPATIBILITY_BPP
             } else {
                 H264EncoderBuilder::QUALITY_BPP
             };
@@ -257,7 +256,7 @@ impl MakeCapturePipeline for screen_capture::Direct3DCapture {
             let bpp = if ultra {
                 H264EncoderBuilder::ULTRA_BPP
             } else if compatibility {
-                H264EncoderBuilder::QUALITY_BPP / 3.0
+                H264EncoderBuilder::COMPATIBILITY_BPP
             } else {
                 H264EncoderBuilder::QUALITY_BPP
             };
