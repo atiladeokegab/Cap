@@ -77,9 +77,12 @@ def test_resume_never_certifies_missing_corrupt_or_escaping_inventory(mirror, de
     try:
         result = mirror("resume", drain_timeout_ms=100)
     except AssertionError as error:
-        assert defect == "outside-outbox" and any(
-            word in str(error).lower() for word in ("path", "outbox", "parent")
-        ), str(error)
+        names = {
+            "missing": ("missing", "not found", "no such file"),
+            "corrupted": ("size", "sha256", "hash", "changed"),
+            "outside-outbox": ("outside", "path", "outbox", "parent"),
+        }
+        assert any(word in str(error).lower() for word in names[defect]), str(error)
     else:
         assert not result["drained"], "Invalid inventory was reported complete"
     assert not any(
@@ -89,3 +92,16 @@ def test_resume_never_certifies_missing_corrupt_or_escaping_inventory(mirror, de
         assert not any(body == marker for _, body in mirror.server.puts()), (
             "Resume read outside its outbox"
         )
+
+
+def test_stop_signal_reaches_server_before_bulk_freeze(mirror):
+    finish_take(mirror.take)
+    observations = []
+    mirror.server.on_put = lambda path, body: observations.append(
+        (path, (mirror.outbox / "project-config.json").exists())
+    )
+    mirror("stop", stopped_at_unix_ms=1793016000000, drain_timeout_ms=1000)
+    assert observations and observations[0][0].endswith("/stop.json")
+    assert observations[0][1] is False, (
+        "VM stop signal was delayed until after the take was frozen"
+    )

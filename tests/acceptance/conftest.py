@@ -18,10 +18,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def run(command, *, timeout=180, env=None, input=None):
+def run(command, *, timeout=180, env=None, input=None, cwd=ROOT):
     result = subprocess.run(
         command,
-        cwd=ROOT,
+        cwd=cwd,
         env={**os.environ, **(env or {})},
         input=input,
         capture_output=True,
@@ -148,6 +148,7 @@ class XMLStore:
         self.errors = []
         self.fail_puts = False
         self.put_budget = None
+        self.on_put = None
 
     def puts(self):
         return [
@@ -197,6 +198,8 @@ def xml_server():
                 status = 403
             if status == 200:
                 if self.command == "PUT":
+                    if store.on_put:
+                        store.on_put(path, body)
                     if store.fail_puts or store.put_budget == 0:
                         status = 503
                     else:

@@ -1,4 +1,5 @@
 import re
+import shutil
 
 from conftest import ROOT, run, source
 
@@ -13,16 +14,36 @@ def test_shortcut_marker_requires_a_comment():
     assert shortcut_limits("// shortcut: one speaker, add mixing for multiple speakers") == ["one speaker, add mixing for multiple speakers"]
 
 
-def test_readme_displays_real_c4_levels_and_documents_shortcuts():
+def test_readme_displays_real_c4_levels_and_documents_shortcuts(tmp_path):
     source("docs/architecture/c4.py")
-    run(["uv", "run", "--offline", "docs/architecture/c4.py"], timeout=120)
+    outputs = [ROOT / "README.md", *ROOT.glob("docs/architecture/c4_*.png")]
+    before = {path: path.read_bytes() for path in outputs}
+    before_paths = set(ROOT.rglob("*"))
+    for name in ("apps", "crates", ".github"):
+        shutil.copytree(
+            ROOT / name, tmp_path / name,
+            ignore=shutil.ignore_patterns("target", "node_modules", ".next", ".git"),
+        )
+    renderer = tmp_path / "docs/architecture/c4.py"
+    renderer.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "docs/architecture/c4.py", renderer)
+    shutil.copy2(ROOT / "README.md", tmp_path / "README.md")
+    run(["uv", "run", "--offline", str(renderer)], timeout=120, cwd=tmp_path)
+    assert set(ROOT.rglob("*")) == before_paths, "Architecture verification created or removed checkout files"
+    assert all(path.read_bytes() == data for path, data in before.items()), (
+        "Architecture verification must not rewrite the checkout"
+    )
     readme = source("README.md")
+    assert (tmp_path / "README.md").read_text() == readme, (
+        "README fork section is stale; regenerate it explicitly outside acceptance tests"
+    )
     assert re.search(r"(?im)^#+\s+Known limitations", readme)
     for level in ("context", "container", "component", "code"):
         relative = f"docs/architecture/c4_{level}.png"
         image = ROOT / relative
         assert image.is_file(), f"Missing C4 level: {relative}"
         assert image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+        assert (tmp_path / relative).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
         assert relative in readme
     for path in (ROOT / "apps/desktop-gpui/src").rglob("*.rs"):
         for limit in shortcut_limits(path.read_text()):
