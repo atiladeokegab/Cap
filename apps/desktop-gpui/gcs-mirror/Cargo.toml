@@ -8,14 +8,17 @@ publish = false
 # Its own crate so the acceptance driver builds without the gpui tree. Every
 # dependency is already in this workspace's lockfile.
 [dependencies]
+bytes = "1"
 chrono = "0.4"
 hex = "0.4"
 hmac = "0.12"
+http-body = "1"
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+tokio = { version = "1", features = ["rt", "time"] }
 tracing = "0.1"
 
 # Test-only: the JSON-over-stdin adapter tests/acceptance drives.
