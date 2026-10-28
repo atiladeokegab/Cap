@@ -16,11 +16,13 @@ use std::{
     fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 
@@ -38,6 +40,11 @@ const LEDGER: &str = "uploaded.jsonl";
 /// slow upload from a dead one. Never in the ledger, `stop.json` or the manifest.
 const PROGRESS: &str = "progress.json";
 const PROGRESS_EVERY: Duration = Duration::from_secs(15);
+/// A take file's PUT fails once no bytes have moved for this long, however
+/// long the whole upload runs.
+const STALL: Duration = Duration::from_secs(60);
+/// 1 Mbit/s: a take file's PUT may take as long as this uplink would need.
+const BYTES_PER_SECOND_FLOOR: u64 = 125_000;
 /// Written instead of `stop.json` when the freeze fails.
 const FAILED: &str = "mirror-failed.json";
 
@@ -189,6 +196,9 @@ pub struct Mirror {
     /// Bytes of the frozen take in the bucket, counted as each PUT streams.
     sent: Arc<AtomicU64>,
     progress_every: Duration,
+    stall: Duration,
+    /// Made on first use, on the thread that uploads, never inside Cap's runtime.
+    streaming: Option<(tokio::runtime::Runtime, reqwest::Client)>,
 }
 
 impl Mirror {
@@ -224,6 +234,8 @@ impl Mirror {
             uploaded,
             sent: Arc::new(AtomicU64::new(0)),
             progress_every: PROGRESS_EVERY,
+            stall: STALL,
+            streaming: None,
         })
     }
 
@@ -233,6 +245,10 @@ impl Mirror {
 
     pub fn set_progress_every(&mut self, every: Duration) {
         self.progress_every = every;
+    }
+
+    pub fn set_stall(&mut self, stall: Duration) {
+        self.stall = stall;
     }
 
     fn signer(&self) -> sigv4::Key<'_> {
@@ -257,16 +273,69 @@ impl Mirror {
         body: Vec<u8>,
         timeout: Duration,
     ) -> Result<Vec<u8>, String> {
-        send_counted(
+        request(
             &self.client,
             &self.signer(),
             method,
             &self.url(key)?,
             body,
             timeout,
-            // only the take's own files count as progress
-            (key != STOP && key != MANIFEST).then_some(&self.sent),
         )
+    }
+
+    /// PUTs one of the take's own files, counting its bytes into `sent` as the
+    /// connection takes them. Fails after `timeout` in all, or once no bytes
+    /// have moved for `stall`: a whole camera.mp4 can need many minutes.
+    fn put_counted(&mut self, key: &str, body: Vec<u8>, timeout: Duration) -> Result<(), String> {
+        let url = self.url(key)?;
+        let headers = signed(&self.signer(), "PUT", &url, &body)?;
+        let moved = Arc::new(Mutex::new(Instant::now()));
+        let length = body.len();
+        let body = Counted {
+            body: body.into(),
+            sent: self.sent.clone(),
+            moved: moved.clone(),
+        };
+        let stall = self.stall;
+        let (runtime, client) = match &mut self.streaming {
+            Some(streaming) => streaming,
+            empty => {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                let client = reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(10))
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                empty.insert((runtime, client))
+            }
+        };
+        let mut request = client
+            .put(url.clone())
+            .timeout(timeout)
+            .header("content-length", length)
+            .body(reqwest::Body::wrap(body));
+        for (name, value) in &headers {
+            request = request.header(name, value);
+        }
+        runtime.block_on(async {
+            let mut response = Box::pin(async {
+                let response = request.send().await?;
+                Ok::<_, reqwest::Error>((response.status(), response.bytes().await?))
+            });
+            loop {
+                match tokio::time::timeout(stall.min(Duration::from_secs(1)), &mut response).await {
+                    Ok(Ok((status, _))) if status.is_success() => return Ok(()),
+                    Ok(Ok((status, _))) => return Err(format!("PUT {}: {status}", url.path())),
+                    Ok(Err(error)) => return Err(error.to_string()),
+                    Err(_) if moved.lock().unwrap().elapsed() >= stall => {
+                        return Err(format!("PUT {}: no bytes moved for {stall:?}", url.path()));
+                    }
+                    Err(_) => {}
+                }
+            }
+        })
     }
 
     /// PUTs `progress.json` every `progress_every` until the returned sender
@@ -322,7 +391,12 @@ impl Mirror {
             return Ok(false);
         }
         let size = body.len();
-        self.send("PUT", key, body, timeout)?;
+        if key == STOP || key == MANIFEST {
+            self.send("PUT", key, body, timeout)?;
+        } else {
+            // only the take's own files count as progress
+            self.put_counted(key, body, timeout)?;
+        }
         let line = json!({ "key": key, "size": size, "sha256": sha }).to_string() + "\n";
         let mut ledger = fs::OpenOptions::new()
             .create(true)
@@ -557,7 +631,9 @@ impl Mirror {
                     continue;
                 }
                 let body = read_frozen(&outbox, file)?;
-                let timeout = deadline.map_or(Duration::from_secs(120), remaining);
+                // Not cut at the deadline: a file cut part-way restarts from
+                // its first byte. The deadline only stops the next one starting.
+                let timeout = Duration::from_secs((file.size / BYTES_PER_SECOND_FLOOR).max(120));
                 // A failed PUT's streamed bytes do not count.
                 self.sent.store(done, Ordering::Relaxed);
                 match self.put_hashed(&file.path, body, file.sha256.clone(), timeout) {
@@ -693,7 +769,7 @@ struct StopFile {
 /// A plain relative path inside the take that is none of the mirror's own files.
 fn inside(relative: &str) -> bool {
     let path = Path::new(relative);
-    ![STOP, MANIFEST, LEDGER, FAILED].contains(&relative)
+    ![STOP, MANIFEST, LEDGER, FAILED, PROGRESS].contains(&relative)
         && path.components().next().is_some()
         && path
             .components()
@@ -725,61 +801,11 @@ pub fn request(
     body: Vec<u8>,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
-    send_counted(client, signer, method, url, body, timeout, None)
-}
-
-/// A request body that adds each byte read from it to `sent`.
-struct Counted {
-    body: io::Cursor<Vec<u8>>,
-    sent: Arc<AtomicU64>,
-}
-
-impl Read for Counted {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let read = self.body.read(buf)?;
-        self.sent.fetch_add(read as u64, Ordering::Relaxed);
-        Ok(read)
-    }
-}
-
-fn send_counted(
-    client: &Client,
-    signer: &sigv4::Key,
-    method: &str,
-    url: &Url,
-    body: Vec<u8>,
-    timeout: Duration,
-    sent: Option<&Arc<AtomicU64>>,
-) -> Result<Vec<u8>, String> {
-    let host = match url.port() {
-        Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
-        None => url.host_str().unwrap_or_default().to_string(),
-    };
-    let sha = sigv4::sha256_hex(&body);
-    let mut headers = BTreeMap::from([
-        ("host".to_string(), host),
-        ("x-amz-content-sha256".to_string(), sha.clone()),
-        (
-            "x-amz-date".to_string(),
-            chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
-        ),
-    ]);
-    let (authorization, _) = sigv4::authorize(signer, method, url, &headers, &sha)?;
-    headers.insert("authorization".into(), authorization);
+    let headers = signed(signer, method, url, &body)?;
     let mut request = client
         .request(method.parse().map_err(|_| "bad method")?, url.clone())
         .timeout(timeout)
-        .body(match sent {
-            Some(sent) => {
-                let length = body.len() as u64;
-                let body = Counted {
-                    body: io::Cursor::new(body),
-                    sent: sent.clone(),
-                };
-                reqwest::blocking::Body::sized(body, length)
-            }
-            None => body.into(),
-        });
+        .body(body);
     for (name, value) in &headers {
         request = request.header(name, value);
     }
@@ -790,6 +816,66 @@ fn send_counted(
         return Err(format!("{method} {}: {status}", url.path()));
     }
     Ok(bytes.to_vec())
+}
+
+/// The SigV4 headers for one request.
+fn signed(
+    signer: &sigv4::Key,
+    method: &str,
+    url: &Url,
+    body: &[u8],
+) -> Result<BTreeMap<String, String>, String> {
+    let host = match url.port() {
+        Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
+        None => url.host_str().unwrap_or_default().to_string(),
+    };
+    let sha = sigv4::sha256_hex(body);
+    let mut headers = BTreeMap::from([
+        ("host".to_string(), host),
+        ("x-amz-content-sha256".to_string(), sha.clone()),
+        (
+            "x-amz-date".to_string(),
+            chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
+        ),
+    ]);
+    let (authorization, _) = sigv4::authorize(signer, method, url, &headers, &sha)?;
+    headers.insert("authorization".into(), authorization);
+    Ok(headers)
+}
+
+/// A request body that adds each chunk to `sent`, and notes when, as the
+/// connection takes it: a stalled connection stops taking chunks.
+struct Counted {
+    body: bytes::Bytes,
+    sent: Arc<AtomicU64>,
+    moved: Arc<Mutex<Instant>>,
+}
+
+impl http_body::Body for Counted {
+    type Data = bytes::Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<bytes::Bytes>, Self::Error>>> {
+        if self.body.is_empty() {
+            return Poll::Ready(None);
+        }
+        let take = self.body.len().min(64 * 1024);
+        let chunk = self.body.split_to(take);
+        self.sent.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        *self.moved.lock().unwrap() = Instant::now();
+        Poll::Ready(Some(Ok(http_body::Frame::data(chunk))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_empty()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.body.len() as u64)
+    }
 }
 
 fn hash_file(path: &Path) -> io::Result<(u64, String)> {

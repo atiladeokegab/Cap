@@ -94,8 +94,22 @@ fn progress_reports_the_bytes_sent_while_a_large_put_is_in_flight() {
         .iter()
         .map(|beat| beat["sent"].as_u64().unwrap())
         .collect();
-    // The camera's bytes count once streamed, before its PUT returns.
-    assert!(sent.iter().any(|&sent| sent >= 1002 + 5000), "{sent:?}");
+    // The camera's bytes count once streamed, before its PUT returns: a beat
+    // logged ahead of the camera's own entry already holds them.
+    let camera = seen
+        .iter()
+        .position(|(path, _)| path.ends_with("/camera.mp4"))
+        .unwrap();
+    assert!(
+        seen[..camera]
+            .iter()
+            .any(|(path, body)| path.ends_with("/progress.json")
+                && serde_json::from_slice::<serde_json::Value>(body).unwrap()["sent"]
+                    .as_u64()
+                    .unwrap()
+                    >= 1002 + 5000),
+        "{sent:?}"
+    );
     assert!(sent.windows(2).all(|pair| pair[0] <= pair[1]), "{sent:?}");
     let ledger = fs::read_to_string(dir.join("outbox/uploaded.jsonl")).unwrap();
     assert!(!ledger.contains("progress.json"));
@@ -122,6 +136,44 @@ fn no_progress_is_sent_once_the_drain_has_returned() {
         seen.lock().unwrap().len(),
         after,
         "still beating {:?} after the drain",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn a_put_that_outlasts_the_drain_deadline_still_lands_once() {
+    let (endpoint, seen) = slow_bucket(Duration::from_millis(1500));
+    let dir = folder("progress-outlasts");
+    let segment = dir.join("take/content/segments/segment-0");
+    fs::write(dir.join("take/recording-meta.json"), b"{}").unwrap();
+    fs::write(segment.join("camera.mp4"), vec![2u8; 5000]).unwrap();
+    let mut mirror = mirror(&dir, &endpoint);
+    mirror.stop(1, Duration::from_millis(800));
+    // the camera was not cut at the deadline; what is left is the manifest
+    assert_eq!(mirror.drain(None), Ok(true));
+
+    let seen = seen.lock().unwrap();
+    let count = |key: &str| seen.iter().filter(|(path, _)| path.ends_with(key)).count();
+    assert_eq!(count("/camera.mp4"), 1, "sent from its first byte again");
+    // a 1 ms manifest PUT past the deadline may reach the bucket too; it is the same body
+    assert!(seen.last().unwrap().0.ends_with("/take-manifest.json"));
+}
+
+#[test]
+fn a_put_whose_bytes_stop_moving_fails_at_the_stall_not_the_overall_cap() {
+    let (endpoint, _) = slow_bucket(Duration::from_secs(3600));
+    let dir = folder("progress-stall");
+    let segment = dir.join("take/content/segments/segment-0");
+    fs::write(dir.join("take/recording-meta.json"), b"{}").unwrap();
+    fs::write(segment.join("camera.mp4"), vec![2u8; 5000]).unwrap();
+    let mut mirror = mirror(&dir, &endpoint);
+    mirror.set_stall(Duration::from_millis(300));
+    let start = Instant::now();
+    // The camera's overall cap is 120 s; only the stall can end it this soon.
+    assert!(!mirror.stop(1, Duration::from_millis(500)).drained);
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
         start.elapsed()
     );
 }
