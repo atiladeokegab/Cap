@@ -9,6 +9,8 @@ name: "fork-windows-release"
 on:
   workflow_dispatch:
   push:
+    branches:
+      - ci/windows-build
     tags:
       - "v*"
 
@@ -60,6 +62,14 @@ jobs:
         run: bun run cap-setup
         env:
           RUST_TARGET_TRIPLE: ${{ env.TARGET }}
+
+      - name: Check cap-recording
+        shell: bash
+        run: cargo check --locked -p cap-recording --target "$TARGET"
+
+      - name: Test cap-gcs-mirror
+        shell: bash
+        run: cargo test --locked --manifest-path apps/desktop-gpui/Cargo.toml -p cap-gcs-mirror --target "$TARGET"
 
       - name: Build desktop binaries
         shell: bash
