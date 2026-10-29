@@ -50,37 +50,23 @@ use std::{
 use tokio::{sync::watch, task::JoinHandle};
 use tracing::{Instrument, debug, error_span, info, trace, warn};
 
-const COMPATIBILITY_CAMERA_ACTIVE_MAX_SCREEN_WIDTH: u32 = 1600;
-const COMPATIBILITY_CAMERA_ACTIVE_MAX_SCREEN_HEIGHT: u32 = 1000;
 const UNCONFIRMED_CAPTURE_CLEANUP: &str =
     "Studio capture cleanup is unconfirmed; local recording preserved";
 
-fn camera_active_max_capture_size(
-    quality: crate::StudioQuality,
-    camera_active: bool,
-) -> Option<(u32, u32)> {
-    if !camera_active {
-        return None;
-    }
-
-    match quality {
-        crate::StudioQuality::Compatibility => Some((
-            COMPATIBILITY_CAMERA_ACTIVE_MAX_SCREEN_WIDTH,
-            COMPATIBILITY_CAMERA_ACTIVE_MAX_SCREEN_HEIGHT,
-        )),
-        crate::StudioQuality::Balanced | crate::StudioQuality::Ultra => None,
-    }
-}
-
-fn studio_max_capture_size(
-    quality: crate::StudioQuality,
-    camera_active: bool,
-) -> Option<(u32, u32)> {
+// Smaller files saves bytes through bpp and frame rate only; the screen keeps its native size so a zoom stays sharp.
+fn studio_max_capture_size() -> Option<(u32, u32)> {
     // ScreenCaptureKit scales on the GPU. Unbounded, a 5K or 6K display is
     // captured at full size and every frame is scaled down to the H.264 limit
     // on the CPU, which also rules out zero-copy VideoToolbox input.
-    camera_active_max_capture_size(quality, camera_active)
-        .or_else(|| cfg!(target_os = "macos").then_some((H264_MAX_DIMENSION, H264_MAX_DIMENSION)))
+    cfg!(target_os = "macos").then_some((H264_MAX_DIMENSION, H264_MAX_DIMENSION))
+}
+
+fn studio_max_fps(quality: crate::StudioQuality, camera_active: bool, max_fps: u32) -> u32 {
+    if quality == crate::StudioQuality::Compatibility && camera_active {
+        max_fps.min(24)
+    } else {
+        max_fps
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -3411,13 +3397,8 @@ async fn create_segment_pipeline(
 
         let (display, crop) =
             target_to_display_and_crop(&capture_target).context("target_display_crop")?;
-        let compatibility_quality = matches!(quality, crate::StudioQuality::Compatibility);
-        let max_capture_size = studio_max_capture_size(quality, camera_active);
-        let effective_max_fps = if compatibility_quality && camera_active {
-            max_fps.min(24)
-        } else {
-            max_fps
-        };
+        let max_capture_size = studio_max_capture_size();
+        let effective_max_fps = studio_max_fps(quality, camera_active, max_fps);
 
         let screen_config = ScreenCaptureConfig::<ScreenCaptureMethod>::init(
             display,
@@ -5793,48 +5774,24 @@ mod tests {
     }
 
     #[test]
-    fn camera_active_capture_size_leaves_non_compatibility_native() {
-        for quality in [crate::StudioQuality::Balanced, crate::StudioQuality::Ultra] {
-            assert!(camera_active_max_capture_size(quality, true).is_none());
-        }
-    }
-
-    #[test]
-    fn camera_active_capture_size_keeps_guardrail_for_compatibility() {
+    fn smaller_files_keeps_native_screen_size_with_its_low_bitrate_and_frame_rate() {
+        let expected =
+            cfg!(target_os = "macos").then_some((H264_MAX_DIMENSION, H264_MAX_DIMENSION));
+        assert_eq!(studio_max_capture_size(), expected);
         assert_eq!(
-            camera_active_max_capture_size(crate::StudioQuality::Compatibility, true),
-            Some((
-                COMPATIBILITY_CAMERA_ACTIVE_MAX_SCREEN_WIDTH,
-                COMPATIBILITY_CAMERA_ACTIVE_MAX_SCREEN_HEIGHT,
-            ))
+            studio_max_fps(crate::StudioQuality::Compatibility, true, 60),
+            24
         );
-    }
-
-    #[test]
-    fn inactive_camera_capture_size_is_unbounded() {
-        for quality in [
-            crate::StudioQuality::Compatibility,
-            crate::StudioQuality::Balanced,
-            crate::StudioQuality::Ultra,
-        ] {
-            assert!(camera_active_max_capture_size(quality, false).is_none());
-        }
-    }
-
-    #[test]
-    fn studio_capture_is_bounded_to_the_h264_limit_on_macos() {
-        for quality in [
-            crate::StudioQuality::Compatibility,
-            crate::StudioQuality::Balanced,
-            crate::StudioQuality::Ultra,
-        ] {
-            let expected =
-                cfg!(target_os = "macos").then_some((H264_MAX_DIMENSION, H264_MAX_DIMENSION));
-            assert_eq!(studio_max_capture_size(quality, false), expected);
+        assert_eq!(
+            studio_max_fps(crate::StudioQuality::Compatibility, false, 60),
+            60
+        );
+        for quality in [crate::StudioQuality::Balanced, crate::StudioQuality::Ultra] {
+            assert_eq!(studio_max_fps(quality, true, 60), 60);
         }
         assert_eq!(
-            studio_max_capture_size(crate::StudioQuality::Compatibility, true),
-            camera_active_max_capture_size(crate::StudioQuality::Compatibility, true),
+            cap_enc_ffmpeg::h264::H264EncoderBuilder::COMPATIBILITY_BPP,
+            0.1
         );
     }
 
