@@ -35,6 +35,7 @@ use crate::{
     session::{Phase, RecordingSession},
     shots::{self, Cue, Shots},
     store::{self, TeleprompterState},
+    teleprompter_pace,
     theme::Theme,
     ui,
 };
@@ -70,6 +71,8 @@ const FOOTER_HEIGHT: f32 = 44.;
 const WPM_MIN: f32 = 60.;
 const WPM_MAX: f32 = 350.;
 const WPM_STEP: f32 = 5.;
+/// One press of the shot list's slower / faster buttons.
+const WPM_PACE_STEP: f32 = 10.;
 
 /// `min="45" max="100" step="5"` on the opacity range. The floor is the same
 /// 0.45 `set_window_opacity` clamps to.
@@ -212,6 +215,9 @@ pub struct TeleprompterWindow {
     /// Scroll offset in pixels from the top, positive. gpui's own offset is the
     /// negative of it.
     position: f32,
+    /// How far through the shot on screen's reading time, 0 to 1 -- see
+    /// [`teleprompter_pace`].
+    shot_progress: f32,
     scroll: ScrollHandle,
     focus: FocusHandle,
     /// The script editor. `ui::TextInputState` in its multi-line shape: the
@@ -341,6 +347,7 @@ impl TeleprompterWindow {
             settings_open: false,
             playback_state,
             position: 0.,
+            shot_progress: 0.,
             scroll: ScrollHandle::new(),
             focus: cx.focus_handle(),
             script_input,
@@ -410,6 +417,7 @@ impl TeleprompterWindow {
             format!("Could not write shots.json: {error}")
         });
         self.position = 0.;
+        self.shot_progress = 0.;
         self.apply_scroll();
         self.playback_state.requested = true;
         self.start_playback(window, cx);
@@ -573,6 +581,17 @@ impl TeleprompterWindow {
         self.edit_script(move |script| *script = next, window, cx);
     }
 
+    /// The shot list's slower / faster buttons, clamped to the speed range.
+    fn change_pace(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let next = clamp(self.state.words_per_minute as f32 + delta, WPM_MIN, WPM_MAX) as u32;
+        if next == self.state.words_per_minute {
+            return;
+        }
+        self.state.words_per_minute = next;
+        self.touch(TeleprompterState::WORDS_PER_MINUTE, window, cx);
+        cx.notify();
+    }
+
     /// `changeFontSize(delta)`, clamped 22-52.
     fn change_font_size(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
         let next = clamp(self.state.font_size + delta, FONT_SIZE_MIN, FONT_SIZE_MAX);
@@ -663,33 +682,46 @@ impl TeleprompterWindow {
             return false;
         }
         let maximum = self.maximum_scroll();
-        if maximum <= 1. {
-            self.playback_state.requested = false;
-            if let Some(shots) = self.shots.as_mut() {
-                shots.ended();
-            }
-            return false;
-        }
-
-        let words = match &self.shots {
-            Some(shots) => shots
+        if let Some(shots) = &self.shots {
+            // The shot's reading time, not its height, decides when STOP
+            // shows: lines that fit sit still until then.
+            let words = shots
                 .current()
                 .lines
                 .iter()
                 .map(|line| count_words(&line.text))
-                .sum(),
-            None => count_words(&self.state.script),
-        };
+                .sum();
+            self.shot_progress = teleprompter_pace::advance_progress(
+                self.shot_progress,
+                elapsed,
+                words,
+                self.state.words_per_minute,
+            );
+            let view = f32::from(self.scroll.bounds().size.height);
+            self.position =
+                teleprompter_pace::scroll_offset(self.shot_progress, view + maximum, view);
+            self.apply_scroll();
+            if self.shot_progress >= 1. {
+                self.playback_state.requested = false;
+                if let Some(shots) = self.shots.as_mut() {
+                    shots.ended();
+                }
+                return false;
+            }
+            return true;
+        }
+        if maximum <= 1. {
+            self.playback_state.requested = false;
+            return false;
+        }
+
+        let words = count_words(&self.state.script);
         let speed = calculate_playback_speed(maximum, words, self.state.words_per_minute);
         self.position = advance_playback_position(self.position, maximum, speed, elapsed);
         self.apply_scroll();
 
         if self.position >= maximum - 0.5 {
             self.playback_state.requested = false;
-            // Past the shot's last line: the STOP cue.
-            if let Some(shots) = self.shots.as_mut() {
-                shots.ended();
-            }
             return false;
         }
         true
@@ -864,7 +896,7 @@ impl Render for TeleprompterWindow {
             .map(|this| match &self.shots {
                 Some(shots) => match shots.upcoming() {
                     Some(card) => this.child(self.render_card(shots, card, cx)),
-                    None => this.child(self.render_shot(shots, window)),
+                    None => this.child(self.render_shot(shots, cx)),
                 },
                 None => this.child(self.render_body(window, cx)),
             })
@@ -1076,15 +1108,13 @@ impl TeleprompterWindow {
             })
     }
 
-    /// The shot on screen: its place in the list and title, what must be on
-    /// screen, then its lines at the script's size, scrolling with the
-    /// recording until the last one has gone by -- then the STOP cue.
-    fn render_shot(&self, shots: &Shots, window: &Window) -> impl IntoElement {
+    /// The shot on screen: its place in the list, title and pace, what must
+    /// be on screen, then its lines at the script's size -- still when they
+    /// fit, else scrolling by the overflow -- until their reading time is up,
+    /// then the STOP cue.
+    fn render_shot(&self, shots: &Shots, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let shot = shots.current();
-        // Room under the last line for it to scroll out of view.
-        let tail =
-            (f32::from(window.viewport_size().height) - HEADER_HEIGHT - FOOTER_HEIGHT).max(0.);
         div()
             .relative()
             .flex_1()
@@ -1101,6 +1131,11 @@ impl TeleprompterWindow {
                     .text_center()
                     .child(
                         div()
+                            .flex()
+                            .flex_row()
+                            .justify_center()
+                            .items_center()
+                            .gap(px(8.))
                             .text_size(px(12.))
                             .text_color(Hsla::from(theme.gray_9))
                             .child(format!(
@@ -1108,7 +1143,41 @@ impl TeleprompterWindow {
                                 shots.index() + 1,
                                 shots.list.shots.len(),
                                 shot.title
-                            )),
+                            ))
+                            // The footer is full: the pace sits by the title,
+                            // where the eye already is while recording.
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .flex_shrink_0()
+                                    .child(
+                                        self.tool_button(
+                                            "pace-slower",
+                                            "icons/minus.svg",
+                                            false,
+                                            cx.listener(|this, _, window, cx| {
+                                                this.change_pace(-WPM_PACE_STEP, window, cx);
+                                            }),
+                                        )
+                                        .size(px(20.))
+                                        .icon_size(px(12.)),
+                                    )
+                                    .child(format!("{} wpm", self.state.words_per_minute))
+                                    .child(
+                                        self.tool_button(
+                                            "pace-faster",
+                                            "icons/plus.svg",
+                                            false,
+                                            cx.listener(|this, _, window, cx| {
+                                                this.change_pace(WPM_PACE_STEP, window, cx);
+                                            }),
+                                        )
+                                        .size(px(20.))
+                                        .icon_size(px(12.)),
+                                    ),
+                            ),
                     )
                     .when_some(shot.on_screen.clone(), |this, on_screen| {
                         this.child(
@@ -1162,8 +1231,7 @@ impl TeleprompterWindow {
                             .line_height(px(self.state.font_size * self.state.line_height))
                             .text_color(Hsla::from(theme.gray_12))
                             .child(line.text.clone())
-                    }))
-                    .child(div().h(px(tail)).flex_shrink_0()),
+                    })),
             )
             .when(shots.cue == Cue::Stop, |this| {
                 let last = shots.index() + 1 == shots.list.shots.len();
