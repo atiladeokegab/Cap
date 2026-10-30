@@ -27,6 +27,18 @@ pub fn scroll_offset(progress: f32, text_height: f32, view_height: f32) -> f32 {
     (text_height - view_height).max(0.) * progress.clamp(0., 1.)
 }
 
+/// The progress to resume from once playback restarts at `offset`: a reader
+/// who scrolled by hand while paused carries on from there. A shot that fits
+/// cannot scroll, so it keeps its reading-time progress.
+pub fn progress_at_offset(offset: f32, text_height: f32, view_height: f32, progress: f32) -> f32 {
+    let overflow = text_height - view_height;
+    if overflow > 0. {
+        (offset / overflow).clamp(0., 1.)
+    } else {
+        progress
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,6 +82,16 @@ mod tests {
         let before = scroll_offset(progress, 600., 200.);
         let after = scroll_offset(advance_progress(progress, 0., 26, 65), 600., 200.);
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn a_hand_scroll_while_paused_is_where_playback_resumes() {
+        // 1000px of overflow, a quarter read, scrolled by hand to 700px.
+        let progress = progress_at_offset(700., 1200., 200., 0.25);
+        let next = scroll_offset(advance_progress(progress, 0.016, 26, 130), 1200., 200.);
+        assert!((next - 700.).abs() < 2., "resumed at {next}");
+        // A shot that fits keeps its reading time.
+        assert_eq!(progress_at_offset(0., 150., 210., 0.25), 0.25);
     }
 
     #[test]

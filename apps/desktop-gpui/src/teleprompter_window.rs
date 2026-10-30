@@ -645,6 +645,15 @@ impl TeleprompterWindow {
             return;
         }
         self.position = (-f32::from(self.scroll.offset().y)).clamp(0., self.maximum_scroll());
+        if self.shots.is_some() {
+            let view = f32::from(self.scroll.bounds().size.height);
+            self.shot_progress = teleprompter_pace::progress_at_offset(
+                self.position,
+                view + self.maximum_scroll(),
+                view,
+                self.shot_progress,
+            );
+        }
 
         // An inactive window only repaints when asked, so the tick both
         // notifies and calls `refresh` -- the same rule the recording bar's
