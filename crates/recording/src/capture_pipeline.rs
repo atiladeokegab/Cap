@@ -9,7 +9,6 @@ use crate::output_pipeline::{MacOSFragmentedM4SMuxer, MacOSFragmentedM4SMuxerCon
 #[cfg(windows)]
 use crate::output_pipeline::{WindowsFragmentedM4SMuxer, WindowsFragmentedM4SMuxerConfig};
 use anyhow::anyhow;
-#[cfg(any(target_os = "macos", windows))]
 use cap_enc_ffmpeg::h264::H264EncoderBuilder;
 #[cfg(target_os = "linux")]
 use cap_enc_ffmpeg::h264::H264Preset;
@@ -84,6 +83,18 @@ pub trait MakeCapturePipeline: ScreenCaptureFormat + std::fmt::Debug + 'static {
 }
 
 pub struct Stop;
+
+/// Bits per pixel for the Windows Media Foundation screen encoder. Its
+/// `calculate_bitrate` is width x height x 30 x this at 30 fps or less, the
+/// same as FFmpeg's bpp, so Smaller files reuses `COMPATIBILITY_BPP`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn media_foundation_bitrate_multiplier(quality: StudioQuality) -> f32 {
+    match quality {
+        StudioQuality::Ultra => 0.3,
+        StudioQuality::Balanced => 0.15,
+        StudioQuality::Compatibility => H264EncoderBuilder::COMPATIBILITY_BPP,
+    }
+}
 
 #[cfg(target_os = "macos")]
 impl MakeCapturePipeline for screen_capture::CMSampleBufferCapture {
@@ -328,7 +339,7 @@ impl MakeCapturePipeline for screen_capture::Direct3DCapture {
             }
         } else {
             let d3d_device = screen_capture.d3d_device.clone();
-            let bitrate_multiplier = if ultra { 0.3f32 } else { 0.15f32 };
+            let bitrate_multiplier = media_foundation_bitrate_multiplier(quality);
 
             OutputPipeline::builder(output_path.clone())
                 .with_video::<screen_capture::VideoSource>(screen_capture)
@@ -780,4 +791,21 @@ pub fn create_d3d_device()
     }
 
     Ok(device.unwrap())
+}
+
+#[cfg(test)]
+mod media_foundation_bitrate_tests {
+    use super::*;
+
+    #[test]
+    fn smaller_files_caps_the_windows_screen_near_7_mbit() {
+        // Media Foundation's calculate_bitrate at 30 fps, for the film's 1734x1399 window.
+        let bitrate = |quality| {
+            1734.0 * 1399.0 * 30.0 * media_foundation_bitrate_multiplier(quality) as f64
+        };
+        let smaller = bitrate(StudioQuality::Compatibility);
+        assert!((6_500_000.0..8_000_000.0).contains(&smaller), "{smaller}");
+        assert!(smaller < bitrate(StudioQuality::Balanced));
+        assert!(bitrate(StudioQuality::Balanced) < bitrate(StudioQuality::Ultra));
+    }
 }
