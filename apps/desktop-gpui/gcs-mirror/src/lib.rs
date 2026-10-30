@@ -53,11 +53,19 @@ const FAILED: &str = "mirror-failed.json";
 const SEND: &str = "send.json";
 pub const CAP_SEND_VERSION: &str = "1";
 /// Local only: the presenter discarded the take, so nothing of it is sent
-/// again and what went up is deleted.
+/// again and what went up is deleted. Holds `{"cleaned": false}` until a LIST
+/// of the take's folder in the bucket comes back empty.
 const DISCARDED: &str = "discarded.json";
 
 pub fn discarded(outbox: &Path) -> bool {
     outbox.join(DISCARDED).is_file()
+}
+
+/// Discarded, but the bucket may still hold some of it: call `discard` again.
+pub fn discard_pending(outbox: &Path) -> bool {
+    fs::read(outbox.join(DISCARDED))
+        .ok()
+        .is_some_and(|body| !body.windows(14).any(|w| w == br#""cleaned":true"#))
 }
 
 /// A take stopped by this fork that is neither sent nor discarded. Takes from
@@ -379,6 +387,7 @@ impl Mirror {
         let (client, sent, every) = (self.client.clone(), self.sent.clone(), self.progress_every);
         let published = self.published.clone();
         let (config, url) = (self.config.clone(), self.url(PROGRESS));
+        let outbox = self.outbox.clone();
         std::thread::spawn(move || {
             let Ok(url) = url else { return };
             let signer = sigv4::Key {
@@ -388,6 +397,9 @@ impl Mirror {
                 service: "s3",
             };
             while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(every) {
+                if discarded(&outbox) {
+                    break;
+                }
                 let now = sent.load(Ordering::Relaxed);
                 let body = json!({ "sent": published.fetch_max(now, Ordering::Relaxed).max(now), "total": total });
                 if let Err(error) = request(
@@ -399,6 +411,11 @@ impl Mirror {
                     every,
                 ) {
                     tracing::warn!(%error, "Progress upload failed");
+                }
+                // Discarded while this beat ran: take it back out.
+                if discarded(&outbox) {
+                    let _ = request(&client, &signer, "DELETE", &url, Vec::new(), every);
+                    break;
                 }
             }
         });
@@ -427,12 +444,18 @@ impl Mirror {
             return Ok(false);
         }
         let size = body.len();
-        if key == STOP || key == MANIFEST {
-            self.send("PUT", key, body, timeout)?;
+        let put = if key == STOP || key == MANIFEST {
+            self.send("PUT", key, body, timeout).map(|_| ())
         } else {
             // only the take's own files count as progress
-            self.put_counted(key, body, timeout)?;
+            self.put_counted(key, body, timeout)
+        };
+        // Discarded while this PUT ran: take it back out, even if its response was lost.
+        if discarded(&self.outbox) {
+            self.delete(key)?;
+            return Err("the take was discarded".into());
         }
+        put?;
         let line = json!({ "key": key, "size": size, "sha256": sha }).to_string() + "\n";
         let mut ledger = fs::OpenOptions::new()
             .create(true)
@@ -444,11 +467,6 @@ impl Mirror {
             .and_then(|()| ledger.sync_data())
             .map_err(|e| e.to_string())?;
         self.uploaded.insert(key.to_string(), sha);
-        // Discarded while this PUT ran: take it back out.
-        if discarded(&self.outbox) {
-            self.delete(key)?;
-            return Err("the take was discarded".into());
-        }
         Ok(true)
     }
 
@@ -655,38 +673,70 @@ impl Mirror {
     }
 
     /// The presenter's Discard: marks the take so nothing more of it goes up,
-    /// then deletes every object of it in the bucket. A sent take stays sent.
+    /// then deletes every object in its bucket folder. `Err` leaves it
+    /// pending (`discard_pending`); call again until `Ok`. A sent take stays sent.
     pub fn discard(&mut self) -> Result<(), String> {
         if self.outbox.join(SEND).is_file() {
             return Err("the take is already sent to film".into());
         }
-        write_atomic(&self.outbox.join(DISCARDED), b"{}")
-            .map_err(|e| format!("write {DISCARDED}: {e}"))?;
-        // Read after the mark: a PUT the drain finishes later deletes itself (put_hashed).
-        let mut keys: Vec<String> = fs::read_to_string(self.outbox.join(LEDGER))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .filter_map(|entry| entry["key"].as_str().map(str::to_string))
-            .chain([PROGRESS.to_string()])
-            .collect();
-        keys.sort();
-        keys.dedup();
-        let failed: Vec<String> = keys
-            .iter()
-            .filter_map(|key| self.delete(key).err())
-            .collect();
-        if failed.is_empty() {
-            Ok(())
-        } else {
-            // shortcut: a failed delete is not retried; the objects left never
-            // get a send.json, so the watcher never builds them.
-            Err(format!(
-                "{} objects stay in the bucket: {}",
-                failed.len(),
-                failed.join("; ")
-            ))
+        if !discard_pending(&self.outbox) && discarded(&self.outbox) {
+            return Ok(());
         }
+        write_atomic(&self.outbox.join(DISCARDED), br#"{"cleaned":false}"#)
+            .map_err(|e| format!("write {DISCARDED}: {e}"))?;
+        // Listed after the mark: a PUT that lands later deletes itself (put_hashed, heartbeat).
+        let folder = format!("{}/", self.prefix);
+        for _ in 0..10 {
+            let keys = self.list(&folder)?;
+            if keys.is_empty() {
+                return write_atomic(&self.outbox.join(DISCARDED), br#"{"cleaned":true}"#)
+                    .map_err(|e| format!("write {DISCARDED}: {e}"));
+            }
+            for key in keys {
+                // Only this take's own folder, never a path that climbs out of it.
+                let relative = key
+                    .strip_prefix(&folder)
+                    .filter(|relative| {
+                        !relative.is_empty()
+                            && relative
+                                .split('/')
+                                .all(|part| !matches!(part, "" | "." | ".."))
+                    })
+                    .ok_or_else(|| format!("the bucket listed {key:?} outside the take"))?;
+                self.delete(relative)?;
+            }
+        }
+        Err("the take's folder in the bucket keeps refilling".into())
+    }
+
+    /// Every object name in the bucket under `prefix` (one page, up to 1000;
+    /// `discard` lists again after deleting them).
+    fn list(&self, prefix: &str) -> Result<Vec<String>, String> {
+        let mut url = Url::parse(&format!("{}/{}", self.endpoint, self.config.bucket))
+            .map_err(|e| e.to_string())?;
+        let prefix = percent_encoding::utf8_percent_encode(prefix, sigv4::UNRESERVED);
+        url.set_query(Some(&format!("list-type=2&prefix={prefix}")));
+        let body = request(
+            &self.client,
+            &self.signer(),
+            "GET",
+            &url,
+            Vec::new(),
+            Duration::from_secs(30),
+        )?;
+        let body = String::from_utf8_lossy(&body);
+        Ok(body
+            .split("<Key>")
+            .skip(1)
+            .filter_map(|rest| rest.split_once("</Key>"))
+            .map(|(key, _)| {
+                key.replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'")
+                    .replace("&amp;", "&")
+            })
+            .collect())
     }
 
     fn delete(&self, key: &str) -> Result<(), String> {

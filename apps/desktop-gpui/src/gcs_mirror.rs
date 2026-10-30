@@ -107,29 +107,34 @@ fn takes(keep: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
 
 static ASKING: AtomicBool = AtomicBool::new(false);
 
+/// The newest undecided take not yet offered in this round of asking.
+fn next_undecided(offered: &[PathBuf]) -> Option<PathBuf> {
+    takes(cap_gcs_mirror::undecided)
+        .into_iter()
+        .filter(|take| !offered.contains(take))
+        .max_by_key(|take| {
+            std::fs::metadata(take.join("outbox/stop.json"))
+                .and_then(|meta| meta.modified())
+                .ok()
+        })
+}
+
 /// Asks "Send to film" or "Discard" for each stopped take not yet decided,
 /// one after another, on the main window (gpui prompts are window sheets).
 /// Runs after each stop and at app start, so a dialog closed or lost to a
-/// crash, which decides nothing, comes back then.
+/// crash, which decides nothing, comes back then. Rescans after each answer,
+/// so a take stopped while a prompt is open is asked about next; one answered
+/// "Not now" waits for the next stop or start.
 pub fn ask(cx: &mut gpui::App) {
-    if config().is_none() {
+    if config().is_none() || next_undecided(&[]).is_none() || ASKING.swap(true, Ordering::Relaxed) {
         return;
     }
-    let mut pending = takes(cap_gcs_mirror::undecided);
-    if pending.is_empty() || ASKING.swap(true, Ordering::Relaxed) {
-        return;
-    }
-    // The take just stopped first.
-    pending.sort_by_key(|take| {
-        std::cmp::Reverse(
-            std::fs::metadata(take.join("outbox/stop.json"))
-                .and_then(|meta| meta.modified())
-                .ok(),
-        )
-    });
     let main = cx.global::<crate::app_windows::AppWindows>().main;
     cx.spawn(async move |cx| {
-        for take in pending {
+        let mut offered = Vec::new();
+        // ask() runs on this same main thread, so no stop lands between the last scan and the reset.
+        while let Some(take) = next_undecided(&offered) {
+            offered.push(take.clone());
             let name = take
                 .file_stem()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -165,7 +170,9 @@ pub fn ask(cx: &mut gpui::App) {
     .detach();
 }
 
-/// Sends `send.json`, or discards the take from the bucket, on its own thread.
+/// Sends `send.json`, or discards the take from the bucket, on its own
+/// thread, retrying while the app runs until the bucket has it. A restart
+/// picks up a decision still unfinished (`resume_pending`).
 fn decide(take: PathBuf, send: bool) {
     let Some(config) = config() else {
         return;
@@ -173,26 +180,46 @@ fn decide(take: PathBuf, send: bool) {
     let _ = std::thread::Builder::new()
         .name("gcs-mirror-send".into())
         .spawn(move || {
-            let Some(mut mirror) = open(config, &take) else {
-                return;
-            };
-            let done = if send {
-                mirror.send_to_film()
-            } else {
-                mirror.discard()
-            };
-            if let Err(error) = done {
-                tracing::error!(%error, take = %take.display(), send, "Mirror could not carry out the choice");
+            let outbox = take.join("outbox");
+            let mut wait = std::time::Duration::from_secs(5);
+            loop {
+                let Some(mut mirror) = open(config.clone(), &take) else {
+                    return;
+                };
+                let done = if send {
+                    mirror.send_to_film()
+                } else {
+                    mirror.discard()
+                };
+                let Err(error) = done else {
+                    return;
+                };
+                tracing::error!(%error, take = %take.display(), send, "Mirror could not carry out the choice; retrying");
+                // The other choice was made first: this one can never land.
+                if (send && cap_gcs_mirror::discarded(&outbox))
+                    || (!send && outbox.join("send.json").is_file())
+                {
+                    return;
+                }
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(std::time::Duration::from_secs(300));
             }
         });
 }
 
-/// After a restart, finishes uploading every stopped take not discarded, and
-/// the `send.json` of each one sent.
+/// After a restart, finishes each Send and Discard still unfinished, then
+/// uploading every stopped take not discarded.
 pub fn resume_pending() {
     let Some(config) = config() else {
         return;
     };
+    // Decisions first, each on its own thread, so no take's long drain holds them up.
+    for take in takes(|outbox| outbox.join("send.json").is_file()) {
+        decide(take, true);
+    }
+    for take in takes(cap_gcs_mirror::discard_pending) {
+        decide(take, false);
+    }
     let pending =
         takes(|outbox| outbox.join("stop.json").is_file() && !cap_gcs_mirror::discarded(outbox));
     if pending.is_empty() {
@@ -205,11 +232,6 @@ pub fn resume_pending() {
                 let Some(mut mirror) = open(config.clone(), &take) else {
                     continue;
                 };
-                if take.join("outbox/send.json").is_file()
-                    && let Err(error) = mirror.send_to_film()
-                {
-                    tracing::error!(%error, take = %take.display(), "Mirror could not send send.json");
-                }
                 // A take whose manifest is in its ledger returns at once.
                 if let Err(error) = mirror.drain(None) {
                     tracing::error!(%error, take = %take.display(), "Mirror cannot complete this take");
