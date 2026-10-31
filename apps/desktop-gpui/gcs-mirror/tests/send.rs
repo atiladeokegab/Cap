@@ -62,13 +62,17 @@ fn a_stopped_take_uploads_but_waits_for_send() {
     assert_eq!(count(&seen, "PUT", "send.json"), 1);
 }
 
-/// A bucket that keeps object names, answers LIST, and can go offline or
-/// keep a PUT but lose its response.
+/// A bucket that keeps object names, answers LIST, and can go offline, keep
+/// a PUT but lose its response, hold PUTs until released, or fail a DELETE.
+/// Each connection runs on its own thread, so a held PUT blocks nothing else.
 #[derive(Default)]
 struct Store {
     objects: BTreeSet<String>,
     offline: bool,
     lose_next_put: bool,
+    hold_puts: bool,
+    puts_waiting: usize,
+    fail_next_delete: bool,
 }
 
 fn store() -> (String, Arc<Mutex<Store>>) {
@@ -78,71 +82,85 @@ fn store() -> (String, Arc<Mutex<Store>>) {
     let shared = state.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let mut parts = line.split_whitespace();
-            let method = parts.next().unwrap_or_default().to_string();
-            let target = parts.next().unwrap_or_default().to_string();
-            let mut length = 0;
-            loop {
-                let mut header = String::new();
-                reader.read_line(&mut header).unwrap();
-                if header.trim().is_empty() {
-                    break;
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut parts = line.split_whitespace();
+                let method = parts.next().unwrap_or_default().to_string();
+                let target = parts.next().unwrap_or_default().to_string();
+                let mut length = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
                 }
-                if let Some((name, value)) = header.split_once(':')
-                    && name.eq_ignore_ascii_case("content-length")
-                {
-                    length = value.trim().parse().unwrap();
+                reader.read_exact(&mut vec![0; length]).unwrap();
+                let (path, query) = target.split_once('?').unwrap_or((&target, ""));
+                let key = percent_decode_str(path.trim_start_matches("/b/"))
+                    .decode_utf8_lossy()
+                    .into_owned();
+                let mut state = shared.lock().unwrap();
+                if method == "PUT" && state.hold_puts {
+                    state.puts_waiting += 1;
+                    while state.hold_puts {
+                        drop(state);
+                        std::thread::sleep(Duration::from_millis(10));
+                        state = shared.lock().unwrap();
+                    }
+                    state.puts_waiting -= 1;
                 }
-            }
-            reader.read_exact(&mut vec![0; length]).unwrap();
-            let (path, query) = target.split_once('?').unwrap_or((&target, ""));
-            let key = percent_decode_str(path.trim_start_matches("/b/"))
-                .decode_utf8_lossy()
-                .into_owned();
-            let mut state = shared.lock().unwrap();
-            let (status, body) = if state.offline {
-                ("503 Service Unavailable", String::new())
-            } else if method == "GET" && query.contains("list-type=2") {
-                let prefix = query.split("prefix=").nth(1).unwrap_or_default();
-                let prefix = percent_decode_str(prefix).decode_utf8_lossy().into_owned();
-                let keys: String = state
-                    .objects
-                    .iter()
-                    .filter(|key| key.starts_with(&prefix))
-                    .map(|key| {
-                        format!(
-                            "<Contents><Key>{}</Key></Contents>",
-                            key.replace('&', "&amp;")
-                        )
-                    })
-                    .collect();
-                (
-                    "200 OK",
-                    format!("<ListBucketResult>{keys}</ListBucketResult>"),
-                )
-            } else if method == "PUT" {
-                state.objects.insert(key);
-                if std::mem::take(&mut state.lose_next_put) {
-                    continue; // stored, but the connection drops before any response
-                }
-                ("200 OK", String::new())
-            } else if method == "DELETE" {
-                state.objects.remove(&key);
-                ("204 No Content", String::new())
-            } else {
-                ("200 OK", String::new())
-            };
-            drop(state);
-            let _ = reader.into_inner().write_all(
+                let (status, body) = if state.offline {
+                    ("503 Service Unavailable", String::new())
+                } else if method == "GET" && query.contains("list-type=2") {
+                    let prefix = query.split("prefix=").nth(1).unwrap_or_default();
+                    let prefix = percent_decode_str(prefix).decode_utf8_lossy().into_owned();
+                    let keys: String = state
+                        .objects
+                        .iter()
+                        .filter(|key| key.starts_with(&prefix))
+                        .map(|key| {
+                            format!(
+                                "<Contents><Key>{}</Key></Contents>",
+                                key.replace('&', "&amp;")
+                            )
+                        })
+                        .collect();
+                    (
+                        "200 OK",
+                        format!("<ListBucketResult>{keys}</ListBucketResult>"),
+                    )
+                } else if method == "PUT" {
+                    state.objects.insert(key);
+                    if std::mem::take(&mut state.lose_next_put) {
+                        return; // stored, but the connection drops before any response
+                    }
+                    ("200 OK", String::new())
+                } else if method == "DELETE" && std::mem::take(&mut state.fail_next_delete) {
+                    ("503 Service Unavailable", String::new())
+                } else if method == "DELETE" {
+                    state.objects.remove(&key);
+                    ("204 No Content", String::new())
+                } else {
+                    ("200 OK", String::new())
+                };
+                drop(state);
+                let _ = reader.into_inner().write_all(
                 format!(
                     "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 )
                 .as_bytes(),
             );
+            });
         }
     });
     (endpoint, state)
@@ -215,6 +233,34 @@ fn a_discard_made_offline_finishes_once_back_online() {
 }
 
 #[test]
+fn discard_waits_for_a_put_still_running_whose_cleanup_delete_fails() {
+    let (endpoint, state) = store();
+    let dir = folder("send-held-put");
+    let outbox = dir.join("outbox");
+    state.lock().unwrap().hold_puts = true;
+    let mut streaming = mirror(&dir, &endpoint);
+    let upload = std::thread::spawn(move || streaming.put("camera.mp4", b"x".to_vec(), NEVER));
+    while state.lock().unwrap().puts_waiting == 0 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The LIST is empty, but the PUT has not landed: Discard is not done.
+    assert!(mirror(&dir, &endpoint).discard().is_err());
+    assert!(discard_pending(&outbox));
+    // It lands, and its own cleanup DELETE fails.
+    {
+        let mut state = state.lock().unwrap();
+        state.fail_next_delete = true;
+        state.hold_puts = false;
+    }
+    assert!(upload.join().unwrap().is_err());
+    assert_eq!(objects(&state), ["takes/t/camera.mp4"]);
+    assert!(discard_pending(&outbox));
+    // The retry (in-app, or at the next start) finds it and finishes.
+    mirror(&dir, &endpoint).discard().unwrap();
+    assert!(objects(&state).is_empty() && !discard_pending(&outbox));
+}
+
+#[test]
 fn discard_never_deletes_a_listed_name_outside_the_take() {
     let (endpoint, state) = store();
     with_neighbours(&state);
@@ -244,14 +290,13 @@ fn a_send_that_failed_offline_lands_once_back_online_unchanged() {
 }
 
 #[test]
-fn a_put_that_lands_after_discard_deletes_itself() {
+fn a_put_started_after_discard_never_goes_up() {
     let (endpoint, seen) = bucket();
     let dir = folder("send-late-put");
     let mut late = mirror(&dir, &endpoint);
     mirror(&dir, &endpoint).discard().unwrap();
     assert!(late.put("late.bin", b"x".to_vec(), NEVER).is_err());
-    assert_eq!(count(&seen, "PUT", "late.bin"), 1);
-    assert_eq!(count(&seen, "DELETE", "late.bin"), 1);
+    assert_eq!(count(&seen, "PUT", "late.bin"), 0);
 }
 
 #[test]

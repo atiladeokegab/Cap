@@ -61,6 +61,30 @@ pub fn discarded(outbox: &Path) -> bool {
     outbox.join(DISCARDED).is_file()
 }
 
+/// Outboxes with a request to the bucket running, once per request: Discard
+/// is complete only when none of its take's are. A request registers before
+/// it reads the Discard mark, so one the mark does not stop is counted here.
+// shortcut: per process; a second process mirroring the same take is not seen.
+static IN_FLIGHT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+struct InFlight(PathBuf);
+
+impl InFlight {
+    fn start(outbox: &Path) -> Self {
+        IN_FLIGHT.lock().unwrap().push(outbox.to_path_buf());
+        Self(outbox.to_path_buf())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        let mut running = IN_FLIGHT.lock().unwrap();
+        if let Some(at) = running.iter().position(|outbox| *outbox == self.0) {
+            running.swap_remove(at);
+        }
+    }
+}
+
 /// Discarded, but the bucket may still hold some of it: call `discard` again.
 pub fn discard_pending(outbox: &Path) -> bool {
     fs::read(outbox.join(DISCARDED))
@@ -397,6 +421,7 @@ impl Mirror {
                 service: "s3",
             };
             while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(every) {
+                let _flight = InFlight::start(&outbox);
                 if discarded(&outbox) {
                     break;
                 }
@@ -444,6 +469,10 @@ impl Mirror {
             return Ok(false);
         }
         let size = body.len();
+        let _flight = InFlight::start(&self.outbox);
+        if discarded(&self.outbox) {
+            return Err("the take was discarded".into());
+        }
         let put = if key == STOP || key == MANIFEST {
             self.send("PUT", key, body, timeout).map(|_| ())
         } else {
@@ -689,6 +718,10 @@ impl Mirror {
         for _ in 0..10 {
             let keys = self.list(&folder)?;
             if keys.is_empty() {
+                // A PUT still running could land after this LIST: list again once it is done.
+                if IN_FLIGHT.lock().unwrap().contains(&self.outbox) {
+                    return Err("an upload of the take is still running".into());
+                }
                 return write_atomic(&self.outbox.join(DISCARDED), br#"{"cleaned":true}"#)
                     .map_err(|e| format!("write {DISCARDED}: {e}"));
             }
