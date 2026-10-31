@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -47,6 +47,72 @@ const STALL: Duration = Duration::from_secs(60);
 const BYTES_PER_SECOND_FLOOR: u64 = 125_000;
 /// Written instead of `stop.json` when the freeze fails.
 const FAILED: &str = "mirror-failed.json";
+/// The presenter's Send (film's send.json contract): `stop.json` says
+/// `send_required`, so the film watcher builds nothing until this lands. A
+/// control file, kept in the outbox and never listed in `stop.json`.
+const SEND: &str = "send.json";
+pub const CAP_SEND_VERSION: &str = "1";
+/// Local only: the presenter discarded the take, so nothing of it is sent
+/// again and what went up is deleted. Holds `{"cleaned": false}` until a LIST
+/// of the take's folder in the bucket comes back empty.
+const DISCARDED: &str = "discarded.json";
+
+pub fn discarded(outbox: &Path) -> bool {
+    outbox.join(DISCARDED).is_file()
+}
+
+/// Per outbox: requests to the bucket running now, and requests ever started.
+/// A request registers before it reads the Discard mark, so one the mark
+/// does not stop is always seen here.
+// shortcut: per process; a second process mirroring the same take is not seen.
+static IN_FLIGHT: LazyLock<Mutex<HashMap<PathBuf, (usize, u64)>>> = LazyLock::new(Default::default);
+
+struct InFlight(PathBuf);
+
+impl InFlight {
+    fn start(outbox: &Path) -> Self {
+        let mut flights = IN_FLIGHT.lock().unwrap();
+        let (running, started) = flights.entry(outbox.to_path_buf()).or_default();
+        *running += 1;
+        *started += 1;
+        Self(outbox.to_path_buf())
+    }
+
+    /// How many requests of the take ever started, if none is running now.
+    fn quiet(outbox: &Path) -> Option<u64> {
+        match IN_FLIGHT.lock().unwrap().get(outbox) {
+            Some((0, started)) => Some(*started),
+            Some(_) => None,
+            None => Some(0),
+        }
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if let Some((running, _)) = IN_FLIGHT.lock().unwrap().get_mut(&self.0) {
+            *running -= 1;
+        }
+    }
+}
+
+/// Discarded, but the bucket may still hold some of it: call `discard` again.
+pub fn discard_pending(outbox: &Path) -> bool {
+    fs::read(outbox.join(DISCARDED))
+        .ok()
+        .is_some_and(|body| !body.windows(14).any(|w| w == br#""cleaned":true"#))
+}
+
+/// A take stopped by this fork that is neither sent nor discarded. Takes from
+/// a fork before the choice (no `send_required`) are never asked about.
+pub fn undecided(outbox: &Path) -> bool {
+    !outbox.join(SEND).is_file()
+        && !discarded(outbox)
+        && fs::read(outbox.join(STOP))
+            .ok()
+            .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
+            .is_some_and(|stop| stop["send_required"] == true)
+}
 
 /// The local config file in the app data folder; the mirror is off without it.
 #[derive(Clone, Deserialize)]
@@ -356,6 +422,7 @@ impl Mirror {
         let (client, sent, every) = (self.client.clone(), self.sent.clone(), self.progress_every);
         let published = self.published.clone();
         let (config, url) = (self.config.clone(), self.url(PROGRESS));
+        let outbox = self.outbox.clone();
         std::thread::spawn(move || {
             let Ok(url) = url else { return };
             let signer = sigv4::Key {
@@ -365,6 +432,10 @@ impl Mirror {
                 service: "s3",
             };
             while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(every) {
+                let _flight = InFlight::start(&outbox);
+                if discarded(&outbox) {
+                    break;
+                }
                 let now = sent.load(Ordering::Relaxed);
                 let body = json!({ "sent": published.fetch_max(now, Ordering::Relaxed).max(now), "total": total });
                 if let Err(error) = request(
@@ -376,6 +447,11 @@ impl Mirror {
                     every,
                 ) {
                     tracing::warn!(%error, "Progress upload failed");
+                }
+                // Discarded while this beat ran: take it back out.
+                if discarded(&outbox) {
+                    let _ = request(&client, &signer, "DELETE", &url, Vec::new(), every);
+                    break;
                 }
             }
         });
@@ -404,12 +480,22 @@ impl Mirror {
             return Ok(false);
         }
         let size = body.len();
-        if key == STOP || key == MANIFEST {
-            self.send("PUT", key, body, timeout)?;
+        let _flight = InFlight::start(&self.outbox);
+        if discarded(&self.outbox) {
+            return Err("the take was discarded".into());
+        }
+        let put = if key == STOP || key == MANIFEST {
+            self.send("PUT", key, body, timeout).map(|_| ())
         } else {
             // only the take's own files count as progress
-            self.put_counted(key, body, timeout)?;
+            self.put_counted(key, body, timeout)
+        };
+        // Discarded while this PUT ran: take it back out, even if its response was lost.
+        if discarded(&self.outbox) {
+            self.delete(key)?;
+            return Err("the take was discarded".into());
         }
+        put?;
         let line = json!({ "key": key, "size": size, "sha256": sha }).to_string() + "\n";
         let mut ledger = fs::OpenOptions::new()
             .create(true)
@@ -568,7 +654,11 @@ impl Mirror {
         if !errors.is_empty() {
             return Err(format!("could not freeze {}", errors.join("; ")));
         }
-        let stop = json!({ "stopped_at_unix_ms": stopped_at_unix_ms, "expected_files": listed });
+        let stop = json!({
+            "send_required": true,
+            "stopped_at_unix_ms": stopped_at_unix_ms,
+            "expected_files": listed,
+        });
         let stop = serde_json::to_vec_pretty(&stop).expect("JSON value serializes");
         write_atomic(&self.outbox.join(STOP), &stop).map_err(|e| format!("write {STOP}: {e}"))
     }
@@ -598,12 +688,119 @@ impl Mirror {
         }
     }
 
+    /// The presenter's Send: PUTs `send.json`, which lets the film watcher
+    /// build the take once its manifest lands. A retry re-sends the first
+    /// decision unchanged; a discarded take is never sent.
+    pub fn send_to_film(&mut self) -> Result<(), String> {
+        if discarded(&self.outbox) {
+            return Err("the take was discarded".into());
+        }
+        let path = self.outbox.join(SEND);
+        let body = match fs::read(&path) {
+            Ok(body) => body,
+            Err(_) => {
+                let choice = json!({
+                    "send": true,
+                    "decided_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    "cap_send_version": CAP_SEND_VERSION,
+                });
+                let body = serde_json::to_vec_pretty(&choice).expect("JSON value serializes");
+                write_atomic(&path, &body).map_err(|e| format!("write {SEND}: {e}"))?;
+                body
+            }
+        };
+        self.put(SEND, body, Duration::from_secs(30)).map(|_| ())
+    }
+
+    /// The presenter's Discard: marks the take so nothing more of it goes up,
+    /// then deletes every object in its bucket folder. `Err` leaves it
+    /// pending (`discard_pending`); call again until `Ok`. A sent take stays sent.
+    pub fn discard(&mut self) -> Result<(), String> {
+        if self.outbox.join(SEND).is_file() {
+            return Err("the take is already sent to film".into());
+        }
+        if !discard_pending(&self.outbox) && discarded(&self.outbox) {
+            return Ok(());
+        }
+        write_atomic(&self.outbox.join(DISCARDED), br#"{"cleaned":false}"#)
+            .map_err(|e| format!("write {DISCARDED}: {e}"))?;
+        // Listed after the mark: a PUT that lands later deletes itself (put_hashed, heartbeat).
+        let folder = format!("{}/", self.prefix);
+        for _ in 0..10 {
+            // An empty LIST proves the folder empty only if no request of the
+            // take ran at any point from before it was sent until it answered.
+            let before = InFlight::quiet(&self.outbox);
+            let keys = self.list(&folder)?;
+            if keys.is_empty() {
+                if before.is_none() || InFlight::quiet(&self.outbox) != before {
+                    return Err("an upload of the take ran during the check".into());
+                }
+                return write_atomic(&self.outbox.join(DISCARDED), br#"{"cleaned":true}"#)
+                    .map_err(|e| format!("write {DISCARDED}: {e}"));
+            }
+            for key in keys {
+                // Only this take's own folder, never a path that climbs out of it.
+                let relative = key
+                    .strip_prefix(&folder)
+                    .filter(|relative| {
+                        !relative.is_empty()
+                            && relative
+                                .split('/')
+                                .all(|part| !matches!(part, "" | "." | ".."))
+                    })
+                    .ok_or_else(|| format!("the bucket listed {key:?} outside the take"))?;
+                self.delete(relative)?;
+            }
+        }
+        Err("the take's folder in the bucket keeps refilling".into())
+    }
+
+    /// Every object name in the bucket under `prefix` (one page, up to 1000;
+    /// `discard` lists again after deleting them).
+    fn list(&self, prefix: &str) -> Result<Vec<String>, String> {
+        let mut url = Url::parse(&format!("{}/{}", self.endpoint, self.config.bucket))
+            .map_err(|e| e.to_string())?;
+        let prefix = percent_encoding::utf8_percent_encode(prefix, sigv4::UNRESERVED);
+        url.set_query(Some(&format!("list-type=2&prefix={prefix}")));
+        let body = request(
+            &self.client,
+            &self.signer(),
+            "GET",
+            &url,
+            Vec::new(),
+            Duration::from_secs(30),
+        )?;
+        let body = String::from_utf8_lossy(&body);
+        Ok(body
+            .split("<Key>")
+            .skip(1)
+            .filter_map(|rest| rest.split_once("</Key>"))
+            .map(|(key, _)| {
+                key.replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'")
+                    .replace("&amp;", "&")
+            })
+            .collect())
+    }
+
+    fn delete(&self, key: &str) -> Result<(), String> {
+        match self.send("DELETE", key, Vec::new(), Duration::from_secs(30)) {
+            Err(error) if !error.ends_with("404 Not Found") => Err(error),
+            _ => Ok(()),
+        }
+    }
+
     /// Uploads what the outbox still holds after a stop, then the manifest.
     /// `Ok(true)`: the take is complete in the bucket. `Ok(false)`: the
-    /// deadline passed first; call again. `Err`: the frozen take does not
-    /// match `stop.json` (missing, changed, or a path outside the outbox),
-    /// so the manifest is never written.
+    /// deadline passed first; call again. `Err`: the take was discarded, or
+    /// the frozen take does not match `stop.json` (missing, changed, or a
+    /// path outside the outbox), so the manifest is never written.
     pub fn drain(&mut self, deadline: Option<Instant>) -> Result<bool, String> {
+        if discarded(&self.outbox) {
+            return Err("the take was discarded".into());
+        }
         if self.uploaded.contains_key(MANIFEST) {
             return Ok(true);
         }
@@ -623,6 +820,9 @@ impl Mirror {
         let _beating = self.heartbeat(expected.iter().map(|file| file.size).sum());
         let mut backoff = Duration::from_secs(1);
         loop {
+            if discarded(&self.outbox) {
+                return Err("the take was discarded".into());
+            }
             let mut failed = false;
             // Counted up front, so a retry pass never reports fewer bytes than the last.
             let mut done: u64 = expected
@@ -638,6 +838,9 @@ impl Mirror {
             for file in &expected {
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     return Ok(false);
+                }
+                if discarded(&self.outbox) {
+                    return Err("the take was discarded".into());
                 }
                 // The bucket already holds exactly this object.
                 if self.uploaded.get(&file.path) == Some(&file.sha256) {
@@ -717,12 +920,8 @@ impl Mirror {
         if failed {
             return;
         }
-        let mut drained = self.drain(Some(Instant::now() + request.drain));
-        let _ = request.drained.send(());
-        if drained == Ok(false) {
-            drained = self.drain(None);
-        }
-        if let Err(error) = drained {
+        // While the presenter decides; send.json goes up on its own (send_to_film).
+        if let Err(error) = self.drain(None) {
             tracing::error!(%error, "Mirror cannot complete this take");
         }
     }
@@ -730,9 +929,7 @@ impl Mirror {
 
 struct StopRequest {
     stopped_at_unix_ms: u64,
-    drain: Duration,
     frozen: mpsc::Sender<Result<(), String>>,
-    drained: mpsc::Sender<()>,
 }
 
 /// The handle to a mirror running on its own thread.
@@ -744,26 +941,20 @@ pub struct Worker {
 impl Worker {
     /// Runs the stop sequence. Blocks, with no time limit, until the freeze
     /// is over: `Err` means this take is not mirrored (`mirror-failed.json`
-    /// says why), and Cap carries on as without a mirror. Then waits for the
-    /// drain for about `drain`; uploads still pending carry on in the background.
-    pub fn stop(self, stopped_at_unix_ms: u64, drain: Duration) -> Result<(), String> {
+    /// says why), and Cap carries on as without a mirror. The drain then runs
+    /// on in the background while the presenter chooses Send or Discard.
+    pub fn stop(self, stopped_at_unix_ms: u64) -> Result<(), String> {
         self.stopping.store(true, Ordering::Relaxed);
         let (frozen, frozen_rx) = mpsc::channel();
-        let (drained, drained_rx) = mpsc::channel();
         self.stop
             .send(StopRequest {
                 stopped_at_unix_ms,
-                drain,
                 frozen,
-                drained,
             })
             .map_err(|_| "mirror thread has exited".to_string())?;
         frozen_rx
             .recv()
-            .map_err(|_| "mirror thread exited before the freeze".to_string())??;
-        // The margin covers one request whose timeout outlives the deadline.
-        let _ = drained_rx.recv_timeout(drain + Duration::from_secs(40));
-        Ok(())
+            .map_err(|_| "mirror thread exited before the freeze".to_string())?
     }
 }
 
@@ -782,7 +973,7 @@ struct StopFile {
 /// A plain relative path inside the take that is none of the mirror's own files.
 fn inside(relative: &str) -> bool {
     let path = Path::new(relative);
-    ![STOP, MANIFEST, LEDGER, FAILED, PROGRESS].contains(&relative)
+    ![STOP, MANIFEST, LEDGER, FAILED, PROGRESS, SEND, DISCARDED].contains(&relative)
         && path.components().next().is_some()
         && path
             .components()

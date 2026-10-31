@@ -7,7 +7,7 @@ use reqwest::Url;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-const UNRESERVED: &AsciiSet = &NON_ALPHANUMERIC
+pub(crate) const UNRESERVED: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
     .remove(b'_')
     .remove(b'.')

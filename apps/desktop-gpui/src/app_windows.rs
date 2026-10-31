@@ -685,6 +685,7 @@ pub fn init(main: WindowHandle<MainWindow>, session: Entity<RecordingSession>, c
             // net effect too, where `restart_recording` clears it and the
             // immediately-following `start_recording` puts it straight back.)
             restore_content_protection(cx);
+            crate::gcs_mirror::ask(cx);
         }
         last_phase = phase;
     })
@@ -695,6 +696,8 @@ pub fn init(main: WindowHandle<MainWindow>, session: Entity<RecordingSession>, c
     // The Tauri app orders it the same way -- `DeepLinkActionExecutor::new` in
     // `setup`, before `on_open_url` is wired (`lib.rs:5449`).
     crate::deeplink::init(cx);
+    // A take stopped before a crash or a closed dialog is asked about again.
+    crate::gcs_mirror::ask(cx);
 }
 
 fn open_preparing_studio_editor(session: &Entity<RecordingSession>, cx: &mut App) {
