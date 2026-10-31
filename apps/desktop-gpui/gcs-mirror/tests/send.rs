@@ -73,6 +73,9 @@ struct Store {
     hold_puts: bool,
     puts_waiting: usize,
     fail_next_delete: bool,
+    /// A LIST takes its names on arrival but answers only once released.
+    hold_lists: bool,
+    lists_waiting: usize,
 }
 
 fn store() -> (String, Arc<Mutex<Store>>) {
@@ -152,6 +155,15 @@ fn store() -> (String, Arc<Mutex<Store>>) {
                 } else {
                     ("200 OK", String::new())
                 };
+                if method == "GET" && state.hold_lists {
+                    state.lists_waiting += 1;
+                    while state.hold_lists {
+                        drop(state);
+                        std::thread::sleep(Duration::from_millis(10));
+                        state = shared.lock().unwrap();
+                    }
+                    state.lists_waiting -= 1;
+                }
                 drop(state);
                 let _ = reader.into_inner().write_all(
                 format!(
@@ -256,6 +268,43 @@ fn discard_waits_for_a_put_still_running_whose_cleanup_delete_fails() {
     assert_eq!(objects(&state), ["takes/t/camera.mp4"]);
     assert!(discard_pending(&outbox));
     // The retry (in-app, or at the next start) finds it and finishes.
+    mirror(&dir, &endpoint).discard().unwrap();
+    assert!(objects(&state).is_empty() && !discard_pending(&outbox));
+}
+
+#[test]
+fn a_list_answered_after_a_put_lands_never_marks_the_discard_done() {
+    let (endpoint, state) = store();
+    let dir = folder("send-stale-list");
+    let outbox = dir.join("outbox");
+    {
+        let mut state = state.lock().unwrap();
+        state.hold_puts = true;
+        state.hold_lists = true;
+    }
+    let mut streaming = mirror(&dir, &endpoint);
+    let upload = std::thread::spawn(move || streaming.put("camera.mp4", b"x".to_vec(), NEVER));
+    while state.lock().unwrap().puts_waiting == 0 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Discard's LIST is taken (empty) while the PUT is pending, but not yet answered.
+    let mut discarding = mirror(&dir, &endpoint);
+    let discard = std::thread::spawn(move || discarding.discard());
+    while state.lock().unwrap().lists_waiting == 0 && !discard.is_finished() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The PUT lands, its cleanup DELETE fails, and nothing is in flight any more.
+    {
+        let mut state = state.lock().unwrap();
+        state.fail_next_delete = true;
+        state.hold_puts = false;
+    }
+    assert!(upload.join().unwrap().is_err());
+    state.lock().unwrap().hold_lists = false;
+    // The stale, empty LIST must not finish the Discard.
+    assert!(discard.join().unwrap().is_err());
+    assert!(discard_pending(&outbox));
+    assert_eq!(objects(&state), ["takes/t/camera.mp4"]);
     mirror(&dir, &endpoint).discard().unwrap();
     assert!(objects(&state).is_empty() && !discard_pending(&outbox));
 }

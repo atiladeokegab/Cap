@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -61,26 +61,37 @@ pub fn discarded(outbox: &Path) -> bool {
     outbox.join(DISCARDED).is_file()
 }
 
-/// Outboxes with a request to the bucket running, once per request: Discard
-/// is complete only when none of its take's are. A request registers before
-/// it reads the Discard mark, so one the mark does not stop is counted here.
+/// Per outbox: requests to the bucket running now, and requests ever started.
+/// A request registers before it reads the Discard mark, so one the mark
+/// does not stop is always seen here.
 // shortcut: per process; a second process mirroring the same take is not seen.
-static IN_FLIGHT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+static IN_FLIGHT: LazyLock<Mutex<HashMap<PathBuf, (usize, u64)>>> = LazyLock::new(Default::default);
 
 struct InFlight(PathBuf);
 
 impl InFlight {
     fn start(outbox: &Path) -> Self {
-        IN_FLIGHT.lock().unwrap().push(outbox.to_path_buf());
+        let mut flights = IN_FLIGHT.lock().unwrap();
+        let (running, started) = flights.entry(outbox.to_path_buf()).or_default();
+        *running += 1;
+        *started += 1;
         Self(outbox.to_path_buf())
+    }
+
+    /// How many requests of the take ever started, if none is running now.
+    fn quiet(outbox: &Path) -> Option<u64> {
+        match IN_FLIGHT.lock().unwrap().get(outbox) {
+            Some((0, started)) => Some(*started),
+            Some(_) => None,
+            None => Some(0),
+        }
     }
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
-        let mut running = IN_FLIGHT.lock().unwrap();
-        if let Some(at) = running.iter().position(|outbox| *outbox == self.0) {
-            running.swap_remove(at);
+        if let Some((running, _)) = IN_FLIGHT.lock().unwrap().get_mut(&self.0) {
+            *running -= 1;
         }
     }
 }
@@ -716,11 +727,13 @@ impl Mirror {
         // Listed after the mark: a PUT that lands later deletes itself (put_hashed, heartbeat).
         let folder = format!("{}/", self.prefix);
         for _ in 0..10 {
+            // An empty LIST proves the folder empty only if no request of the
+            // take ran at any point from before it was sent until it answered.
+            let before = InFlight::quiet(&self.outbox);
             let keys = self.list(&folder)?;
             if keys.is_empty() {
-                // A PUT still running could land after this LIST: list again once it is done.
-                if IN_FLIGHT.lock().unwrap().contains(&self.outbox) {
-                    return Err("an upload of the take is still running".into());
+                if before.is_none() || InFlight::quiet(&self.outbox) != before {
+                    return Err("an upload of the take ran during the check".into());
                 }
                 return write_atomic(&self.outbox.join(DISCARDED), br#"{"cleaned":true}"#)
                     .map_err(|e| format!("write {DISCARDED}: {e}"));
