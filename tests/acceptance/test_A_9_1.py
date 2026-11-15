@@ -1,4 +1,5 @@
 import json
+import time
 
 import pytest
 from conftest import Held, listed, one_line_warning, republished, source
@@ -233,3 +234,26 @@ def test_a_reload_before_the_first_mark_keeps_the_list_the_take_started_with(
     )
     assert len(reads) == 3
     assert result["current"]["shot_id"] == "demo", result
+
+
+def test_final_reload_settles_before_the_driver_reports(driver, xml_server):
+    reads, bucket = republished(xml_server, listed("intro"), listed("demo", "ask"))
+
+    class SlowReload(type(xml_server.objects)):
+        def __contains__(self, key):
+            if len(reads) == 1 and key.endswith("/shotlist/current.json"):
+                # Longer than one step's read wait; only the final drain can apply it.
+                time.sleep(1.5)
+            return super().__contains__(key)
+
+    xml_server.objects = SlowReload(xml_server.objects)
+    result = driver(
+        "shots",
+        **bucket,
+        epoch_ms=0,
+        script=[{"at_ms": 0, "action": "reload"}],
+    )
+    assert result["current"]["shot_id"] == "demo"
+    assert result["current"]["lines"] == ["Demo line 1.", "Demo line 2."]
+    assert result["warning"] is None
+    assert len(reads) == 2

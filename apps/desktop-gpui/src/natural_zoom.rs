@@ -2,8 +2,9 @@
 //!
 //! Clicks are work at the cursor's position, key presses at the last
 //! click's (where the field is). A zoom goes in only when work stays inside
-//! one region (under 40% of the frame's area) for at least 1.5 s, holds while it stays there, and goes out when the work moves
-//! away or stops for 2 s. An isolated click, a click on window chrome and a
+//! one region (at most 60% of each frame dimension, at most 36% of its area)
+//! for at least 1.5 s, holds while it stays there, and goes out when the work
+//! moves away or stops for 2 s. An isolated click, a click on window chrome and a
 //! drag make no zoom. Zoom-ins are at least 6 s apart and zoomed time stays
 //! under 35% of the recording; the longest stretches of work win the budget.
 //!
