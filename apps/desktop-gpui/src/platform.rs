@@ -1546,6 +1546,19 @@ mod mac {
         unsafe { native.0.ignoresMouseEvents() == click_through }
     }
 
+    /// The pointer is over the window: polled, since a click-through window
+    /// gets no mouse events.
+    pub fn cursor_over(native: &NativeWindow) -> bool {
+        use objc2::{class, msg_send};
+        use objc2_foundation::NSPoint;
+        let at: NSPoint = unsafe { msg_send![class!(NSEvent), mouseLocation] };
+        let frame = native.0.frame();
+        at.x >= frame.origin.x
+            && at.x < frame.origin.x + frame.size.width
+            && at.y >= frame.origin.y
+            && at.y < frame.origin.y + frame.size.height
+    }
+
     /// `orderOut:` -- hide without closing, the way the Tauri main window
     /// hides while the recording controls bar is up. Takes the retained
     /// handle for the same reason [`place_overlay_panel`] does: ordering a
@@ -2751,6 +2764,9 @@ mod stub {
         0
     }
     pub fn set_window_click_through(_native: &NativeWindow, _click_through: bool) -> bool {
+        false
+    }
+    pub fn cursor_over(_native: &NativeWindow) -> bool {
         false
     }
     pub fn native_window(_window: &Window) -> Option<NativeWindow> {

@@ -3,14 +3,15 @@ use std::path::{Path, PathBuf};
 
 use gpui::{ForegroundExecutor, Window, WindowAppearance};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows_sys::Win32::Foundation::{HWND, RECT};
+use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DefWindowProcW, GetForegroundWindow, GetWindowDisplayAffinity, GetWindowRect, HWND_NOTOPMOST,
-    HWND_TOP, HWND_TOPMOST, IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SW_HIDE,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow,
-    SetWindowDisplayAffinity, SetWindowPos, ShowWindowAsync, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
-    WM_CLOSE, WM_NCACTIVATE,
+    DefWindowProcW, GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetWindowDisplayAffinity,
+    GetWindowLongPtrW, GetWindowRect, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IsIconic,
+    IsWindowVisible, IsZoomed, LWA_ALPHA, PostMessageW, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE,
+    SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetLayeredWindowAttributes,
+    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindowAsync,
+    WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WM_CLOSE, WM_NCACTIVATE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 
 use super::{ForcedAppearance, MaterialKind, PanelBehavior};
@@ -175,8 +176,43 @@ pub fn set_window_capture_hidden(native: &NativeWindow, hidden: bool) -> usize {
     }
 }
 
-pub fn set_window_click_through(_native: &NativeWindow, _click_through: bool) -> bool {
-    false
+/// Clicks pass to the window under it: `WS_EX_TRANSPARENT` hit-tests through
+/// only on a layered window, kept at full alpha (the background's own alpha
+/// is painted per pixel, so the text stays opaque).
+pub fn set_window_click_through(native: &NativeWindow, click_through: bool) -> bool {
+    let hwnd = native.hwnd();
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let flags = (WS_EX_LAYERED | WS_EX_TRANSPARENT) as isize;
+        let style = if click_through {
+            style | flags
+        } else {
+            style & !(WS_EX_TRANSPARENT as isize)
+        };
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style);
+        if click_through {
+            SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+        }
+        (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TRANSPARENT as isize != 0) == click_through
+    }
+}
+
+/// The pointer is over the window: polled, since a click-through window
+/// gets no mouse events.
+pub fn cursor_over(native: &NativeWindow) -> bool {
+    let mut at = POINT { x: 0, y: 0 };
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    unsafe {
+        GetCursorPos(&mut at) != 0
+            && GetWindowRect(native.hwnd(), &mut rect) != 0
+            && (rect.left..rect.right).contains(&at.x)
+            && (rect.top..rect.bottom).contains(&at.y)
+    }
 }
 
 pub fn restore_borderless_style(_native: &NativeWindow) {}

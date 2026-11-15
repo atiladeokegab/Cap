@@ -76,6 +76,13 @@ pub struct Shot {
         skip_serializing_if = "Option::is_none"
     )]
     pub zoom: Option<String>,
+    /// Who speaks this shot, on its card (shot list 0.6.0).
+    #[serde(
+        default,
+        deserialize_with = "present_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub performer_label: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -299,6 +306,77 @@ pub enum Cue {
     Countdown(Action),
 }
 
+/// What the teleprompter is doing, for its look (A-12.2, A-12.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// A card or the first shot's lines, before Go: opaque, takes clicks.
+    Reading,
+    /// Go's 3-2-1.
+    Countdown,
+    /// Recording a shot: see-through and click-through.
+    Running,
+}
+
+impl Phase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Phase::Reading => "reading",
+            Phase::Countdown => "countdown",
+            Phase::Running => "running",
+        }
+    }
+}
+
+/// In place of a card after Next on the last shot.
+pub const DONE_MESSAGE: &str = "All shots done: press Stop";
+pub const RECORDING_STATE: &str = "RECORDING";
+pub const PAUSED_STATE: &str = "PAUSED";
+pub const RECORDING_COLOR: u32 = 0xe5484d;
+pub const PAUSED_COLOR: u32 = 0xf5a524;
+
+/// Running's background opacity, a percent the user sets within these bounds.
+pub const RUNNING_OPACITY_DEFAULT: u32 = 40;
+pub const RUNNING_OPACITY_MIN: u32 = 20;
+pub const RUNNING_OPACITY_MAX: u32 = 90;
+/// Running's background while the mouse is over it, to see what is under.
+pub const MOUSE_OVER_ALPHA: f64 = 0.15;
+
+/// The window flags a phase asks the platform for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowLook {
+    pub background_alpha: f64,
+    pub text_alpha: f64,
+    pub click_through: bool,
+    /// Never in the recording: the prompter is for the speaker only.
+    pub capture_excluded: bool,
+}
+
+pub fn window_look(phase: Phase, opacity_percent: u32, mouse_over: bool) -> WindowLook {
+    let running = phase == Phase::Running;
+    let percent = opacity_percent.clamp(RUNNING_OPACITY_MIN, RUNNING_OPACITY_MAX);
+    WindowLook {
+        background_alpha: match (running, mouse_over) {
+            (false, _) => 1.0,
+            (true, true) => MOUSE_OVER_ALPHA,
+            (true, false) => percent as f64 / 100.,
+        },
+        text_alpha: 1.0,
+        click_through: running,
+        capture_excluded: true,
+    }
+}
+
+/// The shell's alpha as drawn: the look's alpha itself, not scaled by the
+/// theme's own tint (0.9 off mac), so Running at 40% is 0.4. A transparent
+/// glass shell stays transparent.
+pub fn shell_alpha(theme_alpha: f32, look_alpha: f64) -> f32 {
+    if theme_alpha == 0. {
+        0.
+    } else {
+        look_alpha as f32
+    }
+}
+
 /// Go's 3-2-1, one count a second.
 pub const COUNTDOWN_MS: u64 = 3000;
 
@@ -356,6 +434,50 @@ pub fn take_zoomless(
         .map_or_else(Vec::new, |list| zoomless(&list, &marks)))
 }
 
+/// Each mark's shot and how long it ran, in seconds, for the after-Stop
+/// question: up to the next mark in its segment, else the segment's end. A
+/// segment's length is its display track's fragment durations; `None` where
+/// the take does not record them.
+pub fn shot_lengths(take: &Path) -> Vec<(String, Option<f64>)> {
+    // Plain JSON, not ShotMark: a time written as 1500.0 still reads.
+    let marks: Vec<(String, u64, f64)> = std::fs::read(take.join(SHOTS_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<serde_json::Value>>(&bytes).ok())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|mark| {
+            Some((
+                mark["shot_id"].as_str()?.to_string(),
+                mark["segment"].as_u64()?,
+                mark["time_ms"].as_f64()? / 1000.,
+            ))
+        })
+        .collect();
+    let segment_s = |segment: u64| -> Option<f64> {
+        let path = take.join(format!(
+            "content/segments/segment-{segment}/display/manifest.json"
+        ));
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+        manifest["fragments"]
+            .as_array()?
+            .iter()
+            .map(|fragment| fragment["duration"].as_f64())
+            .sum()
+    };
+    marks
+        .iter()
+        .enumerate()
+        .map(|(index, (shot_id, segment, start))| {
+            let end = match marks.get(index + 1).filter(|next| next.1 == *segment) {
+                Some(next) => Some(next.2),
+                None => segment_s(*segment),
+            };
+            (shot_id.clone(), end.map(|end| (end - start).max(0.)))
+        })
+        .collect()
+}
+
 /// The mirror uploads take files while recording: never let it read half.
 fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let temp = path.with_extension("json.tmp");
@@ -373,6 +495,8 @@ pub struct Shots {
     pub cue: Cue,
     /// A list read mid-take, shown once the take ends.
     pending: Option<ShotList>,
+    /// Next pressed on the last shot: "All shots done" until the take ends.
+    pub done: bool,
 }
 
 impl Shots {
@@ -385,6 +509,7 @@ impl Shots {
             marks: Vec::new(),
             cue: Cue::Reading,
             pending: None,
+            done: false,
         }
     }
 
@@ -401,12 +526,15 @@ impl Shots {
             self.current = 0;
             self.cue = Cue::Reading;
             self.pending = None;
+            self.done = false;
         }
     }
 
     /// The shot a Ready or Countdown cue's action starts, for its card.
     pub fn upcoming(&self) -> Option<&Shot> {
         match self.cue {
+            // Go on a fresh take counts in its first shot.
+            Cue::Countdown(Action::Next) if !self.started => Some(self.current()),
             Cue::Ready(Action::Next) | Cue::Countdown(Action::Next) => {
                 self.list.shots.get(self.current + 1)
             }
@@ -439,13 +567,54 @@ impl Shots {
         hold
     }
 
-    /// Go on a Ready card: the action the resume will mark.
+    /// Go on a Ready card, or on a fresh take's first shot: the action the
+    /// countdown's end will mark.
     pub fn go(&mut self) -> Option<Action> {
-        let Cue::Ready(action) = self.cue else {
-            return None;
+        let action = match self.cue {
+            Cue::Ready(action) => action,
+            Cue::Reading if !self.started && self.take.is_some() => Action::Next,
+            _ => return None,
         };
         self.cue = Cue::Countdown(action);
         Some(action)
+    }
+
+    pub fn phase(&self) -> Phase {
+        match self.cue {
+            Cue::Countdown(_) => Phase::Countdown,
+            Cue::Ready(_) => Phase::Reading,
+            _ if !self.started => Phase::Reading,
+            _ => Phase::Running,
+        }
+    }
+
+    /// "Shot 2 of 3: Show the export" for `shot` on a card.
+    pub fn heading(&self, shot: &Shot) -> String {
+        format!(
+            "Shot {} of {}: {}",
+            self.number(shot),
+            self.list.shots.len(),
+            shot.title
+        )
+    }
+
+    /// Under the 3-2-1: "Recording shot 2".
+    pub fn countdown_label(&self) -> Option<String> {
+        match self.cue {
+            Cue::Countdown(_) => self
+                .upcoming()
+                .map(|shot| format!("Recording shot {}", self.number(shot))),
+            _ => None,
+        }
+    }
+
+    fn number(&self, shot: &Shot) -> usize {
+        self.list
+            .shots
+            .iter()
+            .position(|s| std::ptr::eq(s, shot))
+            .unwrap_or(0)
+            + 1
     }
 
     pub fn current(&self) -> &Shot {
@@ -483,6 +652,7 @@ impl Shots {
                 })
                 .unwrap_or(0);
             self.take = Some(take.to_path_buf());
+            self.done = false;
         }
     }
 
@@ -501,6 +671,7 @@ impl Shots {
                 self.take = None;
                 self.marks.clear();
                 self.cue = Cue::Reading;
+                self.done = false;
             }
         }
     }
@@ -512,6 +683,7 @@ impl Shots {
         self.open(take);
         if action == Action::Next && self.started {
             if self.current + 1 == self.list.shots.len() {
+                self.done = true;
                 return Ok(());
             }
             self.current += 1;
@@ -710,6 +882,52 @@ mod tests {
         assert!(!shots.hold(Action::Next));
         assert_eq!(shots.upcoming(), None);
         std::fs::remove_dir_all(&take).unwrap();
+    }
+
+    #[test]
+    fn go_on_a_fresh_take_counts_in_shot_one_and_the_last_next_is_done() {
+        let take = std::env::temp_dir().join(format!("cap-shots-go-{}", std::process::id()));
+        std::fs::create_dir_all(&take).unwrap();
+        let mut shots = Shots::new(list());
+        // No take yet: Go has nothing to start.
+        assert_eq!(shots.go(), None);
+        shots.follow(Some(&take));
+        assert_eq!(shots.phase(), Phase::Reading);
+        assert_eq!(shots.go(), Some(Action::Next));
+        assert_eq!(shots.phase(), Phase::Countdown);
+        assert_eq!(shots.countdown_label().as_deref(), Some("Recording shot 1"));
+        shots.mark(Action::Next, &take, (0, 3000)).unwrap();
+        assert_eq!(shots.phase(), Phase::Running);
+        assert!(shots.hold(Action::Next));
+        assert_eq!(shots.phase(), Phase::Reading);
+        assert_eq!(
+            shots.heading(shots.upcoming().unwrap()),
+            "Shot 2 of 2: Demo"
+        );
+        shots.go();
+        shots.mark(Action::Next, &take, (1, 0)).unwrap();
+        assert!(!shots.done && !shots.hold(Action::Next));
+        shots.mark(Action::Next, &take, (1, 900)).unwrap();
+        assert!(shots.done && shots.marks().len() == 2);
+        shots.follow(None);
+        assert!(!shots.done);
+        std::fs::remove_dir_all(&take).unwrap();
+    }
+
+    #[test]
+    fn window_look_clamps_running_opacity_and_keeps_cards_opaque() {
+        let alpha = |phase, percent, over| window_look(phase, percent, over).background_alpha;
+        assert_eq!(alpha(Phase::Running, 10, false), 0.2);
+        assert_eq!(alpha(Phase::Running, 95, false), 0.9);
+        assert_eq!(alpha(Phase::Running, 40, true), MOUSE_OVER_ALPHA);
+        assert_eq!(alpha(Phase::Reading, 40, true), 1.0);
+        assert!(window_look(Phase::Running, 40, false).click_through);
+        assert!(!window_look(Phase::Countdown, 40, false).click_through);
+        // Drawn on the non-mac 0.9 shell, the alpha is the requested one.
+        assert_eq!(shell_alpha(0.9, alpha(Phase::Running, 40, false)), 0.4);
+        assert_eq!(shell_alpha(0.9, alpha(Phase::Running, 40, true)), 0.15);
+        assert_eq!(shell_alpha(0.9, alpha(Phase::Reading, 40, false)), 1.0);
+        assert_eq!(shell_alpha(0., 0.4), 0.);
     }
 
     #[test]

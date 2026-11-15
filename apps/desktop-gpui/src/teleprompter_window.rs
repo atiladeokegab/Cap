@@ -76,8 +76,8 @@ const WPM_PACE_STEP: f32 = 10.;
 
 /// `min="45" max="100" step="5"` on the opacity range. The floor is the same
 /// 0.45 `set_window_opacity` clamps to.
-const OPACITY_MIN: f32 = 45.;
-const OPACITY_MAX: f32 = 100.;
+const OPACITY_MIN: f32 = shots::RUNNING_OPACITY_MIN as f32;
+const OPACITY_MAX: f32 = shots::RUNNING_OPACITY_MAX as f32;
 const OPACITY_STEP: f32 = 5.;
 
 /// `clamp(current.fontSize + delta, 22, 52)` with `delta = ±2`.
@@ -252,6 +252,12 @@ pub struct TeleprompterWindow {
     reads: shots::Reads,
     /// The live take last seen: a new one reads the list again.
     take: Option<std::path::PathBuf>,
+    /// The shot list's phase last rendered: its changes chime and switch
+    /// click-through.
+    phase: Option<shots::Phase>,
+    /// The pointer over the window while Running fades it to 15%.
+    mouse_over: bool,
+    _pointer_poll: gpui::Task<()>,
 }
 
 impl TeleprompterWindow {
@@ -340,6 +346,27 @@ impl TeleprompterWindow {
             this.read_shot_list(false, window, cx)
         });
 
+        // A click-through window gets no hover events: poll the pointer.
+        let pointer_poll = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                let polled = this.update_in(cx, |this, window, cx| {
+                    let over = this.phase == Some(shots::Phase::Running)
+                        && platform::native_window(window)
+                            .is_some_and(|native| platform::cursor_over(&native));
+                    if over != this.mouse_over {
+                        this.mouse_over = over;
+                        cx.notify();
+                    }
+                });
+                if polled.is_err() {
+                    break;
+                }
+            }
+        });
+
         crate::theme::bind_window(window, cx);
         Self {
             theme: Theme::for_window(window, cx, true),
@@ -365,6 +392,9 @@ impl TeleprompterWindow {
             countdown_task: None,
             reads: shots::Reads::default(),
             take: session.read(cx).shot_take(),
+            phase: None,
+            mouse_over: false,
+            _pointer_poll: pointer_poll,
         }
     }
 
@@ -379,7 +409,8 @@ impl TeleprompterWindow {
     }
 
     /// Next shot / Retake. On a started take Next stops between shots: the
-    /// recording pauses on the next shot's card until Go (or Next again).
+    /// recording pauses on the next shot's card until Go; Next again there
+    /// does nothing.
     /// The take's first shot, and Retake while recording, mark at once.
     pub fn mark_shot(
         &mut self,
@@ -390,8 +421,8 @@ impl TeleprompterWindow {
         let Some(shots) = self.shots.as_mut() else {
             return;
         };
-        if shots.cue == Cue::Ready(action) {
-            self.go(window, cx);
+        // A press during the 3-2-1 changes nothing (A-12.2).
+        if matches!(shots.cue, Cue::Countdown(_)) {
             return;
         }
         if shots.hold(action) {
@@ -450,8 +481,16 @@ impl TeleprompterWindow {
                 })
                 .ok();
             }
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 this.countdown = None;
+                // Go on a fresh take: the recording never paused, so no resume
+                // comes to mark the first shot.
+                let running = RecordingSession::global(cx).read(cx).shot_time().is_some();
+                if let Some(Cue::Countdown(action)) = this.shots.as_ref().map(|shots| shots.cue)
+                    && running
+                {
+                    this.write_mark(action, window, cx);
+                }
                 set_recording_paused(false, cx);
                 cx.notify();
             })
@@ -518,14 +557,45 @@ impl TeleprompterWindow {
         .detach();
     }
 
-    /// `clamp(state().windowOpacityPercent, 45, 100) / 100`, for the initial
-    /// `setTeleprompterWindowOpacity` the load effect fires.
+    /// The whole window stays opaque: the opacity setting fades only the
+    /// background (A-12.3), so the text keeps full contrast.
     pub fn window_alpha(&self) -> f64 {
-        f64::from(clamp(
-            self.state.window_opacity_percent as f32,
-            OPACITY_MIN,
-            OPACITY_MAX,
-        )) / 100.
+        1.
+    }
+
+    /// The flags the window asks the platform for: the shot list's phase, or
+    /// the stock teleprompter's translucent background that still takes clicks.
+    fn look(&self) -> shots::WindowLook {
+        let percent = self.state.running_opacity_percent;
+        match &self.shots {
+            Some(shots) => shots::window_look(shots.phase(), percent, self.mouse_over),
+            None => shots::WindowLook {
+                click_through: false,
+                ..shots::window_look(shots::Phase::Running, percent, false)
+            },
+        }
+    }
+
+    /// On each phase change: the chime as Running stops on a card, and
+    /// click-through on or off.
+    fn sync_phase(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let phase = self.shots.as_ref().map(Shots::phase);
+        if phase == self.phase {
+            return;
+        }
+        let was = std::mem::replace(&mut self.phase, phase);
+        if was == Some(shots::Phase::Running) && phase == Some(shots::Phase::Reading) {
+            crate::app_sounds::play_notification();
+        }
+        let click_through = self.look().click_through;
+        if let Some(native) = platform::native_window(window) {
+            cx.spawn(async move |_, _| {
+                if !platform::set_window_click_through(&native, click_through) {
+                    tracing::warn!(click_through, "teleprompter click-through not applied");
+                }
+            })
+            .detach();
+        }
     }
 
     fn sync_appearance(&mut self, window: &Window, cx: &gpui::App) {
@@ -777,10 +847,9 @@ impl TeleprompterWindow {
             }
             Slider::Opacity => {
                 let value = stepped(fraction, OPACITY_MIN, OPACITY_MAX, OPACITY_STEP) as u32;
-                if value != self.state.window_opacity_percent {
-                    self.state.window_opacity_percent = value;
-                    self.touch(TeleprompterState::WINDOW_OPACITY_PERCENT, window, cx);
-                    self.apply_window_alpha(window, cx);
+                if value != self.state.running_opacity_percent {
+                    self.state.running_opacity_percent = value;
+                    self.touch(TeleprompterState::RUNNING_OPACITY_PERCENT, window, cx);
                     cx.notify();
                 }
             }
@@ -879,7 +948,10 @@ fn stepped(fraction: f32, minimum: f32, maximum: f32, step: f32) -> f32 {
 impl Render for TeleprompterWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_appearance(window, cx);
+        self.sync_phase(window, cx);
         let theme = self.theme;
+        let mut shell = theme.teleprompter_shell_bg();
+        shell.a = shots::shell_alpha(shell.a, self.look().background_alpha);
 
         div()
             .track_focus(&self.focus)
@@ -892,7 +964,7 @@ impl Render for TeleprompterWindow {
             .flex_col()
             .overflow_hidden()
             .rounded(px(theme.teleprompter_window_radius()))
-            .bg(theme.teleprompter_shell_bg())
+            .bg(shell)
             .when_some(theme.teleprompter_shell_border(), |this, color| {
                 this.border_1().border_color(color)
             })
@@ -903,7 +975,7 @@ impl Render for TeleprompterWindow {
             .text_color(Hsla::from(theme.gray_12))
             .child(self.render_header(window))
             .map(|this| match &self.shots {
-                Some(shots) => match shots.upcoming() {
+                Some(shots) => match shots.upcoming().filter(|_| !shots.done) {
                     Some(card) => this.child(self.render_card(shots, card, cx)),
                     None => this.child(self.render_shot(shots, cx)),
                 },
@@ -1242,7 +1314,22 @@ impl TeleprompterWindow {
                             .child(line.text.clone())
                     })),
             )
-            .when(shots.cue == Cue::Stop, |this| {
+            .when(shots.done, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(Theme::with_alpha(theme.gray_1, 0.6))
+                        .text_size(px(self.state.font_size))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(Hsla::from(theme.gray_12))
+                        .child(shots::DONE_MESSAGE),
+                )
+            })
+            .when(shots.cue == Cue::Stop && !shots.done, |this| {
                 let last = shots.index() + 1 == shots.list.shots.len();
                 this.child(
                     div()
@@ -1285,19 +1372,18 @@ impl TeleprompterWindow {
     ) -> impl IntoElement {
         let theme = self.theme;
         let size = self.state.font_size;
-        let index = shots
-            .list
-            .shots
-            .iter()
-            .position(|shot| std::ptr::eq(shot, card))
-            .unwrap_or(0);
-        let label = match shots.cue {
-            Cue::Ready(shots::Action::Retake) | Cue::Countdown(shots::Action::Retake) => "Retake",
-            _ => "Next shot",
-        };
+        let retake = matches!(
+            shots.cue,
+            Cue::Ready(shots::Action::Retake) | Cue::Countdown(shots::Action::Retake)
+        );
         let count = self
             .countdown
             .map(|started| shots::countdown(started.elapsed().as_millis() as u64).unwrap_or(1));
+        // Paused on the card until the countdown's end (A-12.2).
+        let (state, color) = match shots.phase() {
+            shots::Phase::Running => (shots::RECORDING_STATE, shots::RECORDING_COLOR),
+            _ => (shots::PAUSED_STATE, shots::PAUSED_COLOR),
+        };
         div()
             .id("card")
             .flex_1()
@@ -1312,20 +1398,29 @@ impl TeleprompterWindow {
             .child(
                 div()
                     .text_size(px(12.))
-                    .text_color(Hsla::from(theme.gray_9))
-                    .child(format!(
-                        "{label} \u{b7} {}/{}",
-                        index + 1,
-                        shots.list.shots.len()
-                    )),
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(Hsla::from(gpui::rgb(color)))
+                    .child(if retake {
+                        format!("{state} \u{b7} Retake")
+                    } else {
+                        state.to_string()
+                    }),
             )
             .child(
                 div()
                     .text_size(px(size * shots::CARD_SCALE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(Hsla::from(theme.gray_12))
-                    .child(card.title.clone()),
+                    .child(shots.heading(card)),
             )
+            .when_some(card.performer_label.clone(), |this, performer| {
+                this.child(
+                    div()
+                        .text_size(px(size))
+                        .text_color(Hsla::from(theme.gray_11))
+                        .child(performer),
+                )
+            })
             .when_some(card.on_screen.clone(), |this, on_screen| {
                 this.child(
                     div()
@@ -1336,10 +1431,22 @@ impl TeleprompterWindow {
             })
             .child(match count {
                 Some(count) => div()
-                    .text_size(px(size * 2.5))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(Hsla::from(theme.gray_12))
-                    .child(count.to_string())
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_size(px(size * 2.5))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(Hsla::from(theme.gray_12))
+                            .child(count.to_string()),
+                    )
+                    .children(shots.countdown_label().map(|label| {
+                        div()
+                            .text_size(px(14.))
+                            .text_color(Hsla::from(theme.gray_11))
+                            .child(label)
+                    }))
                     .into_any_element(),
                 None => self
                     .pill()
@@ -1505,7 +1612,7 @@ impl TeleprompterWindow {
                             .child(self.render_range(
                                 "opacity",
                                 Slider::Opacity,
-                                (self.state.window_opacity_percent as f32 - OPACITY_MIN)
+                                (self.state.running_opacity_percent as f32 - OPACITY_MIN)
                                     / (OPACITY_MAX - OPACITY_MIN),
                                 Hsla::from(theme.gray_11),
                                 cx,
@@ -1875,7 +1982,7 @@ mod tests {
         assert_eq!(stepped(0.5, WPM_MIN, WPM_MAX, WPM_STEP), 205.);
         // 60 + 0.51 * 290 = 207.9 -> 210.
         assert_eq!(stepped(0.51, WPM_MIN, WPM_MAX, WPM_STEP), 210.);
-        assert_eq!(stepped(0., OPACITY_MIN, OPACITY_MAX, OPACITY_STEP), 45.);
-        assert_eq!(stepped(1., OPACITY_MIN, OPACITY_MAX, OPACITY_STEP), 100.);
+        assert_eq!(stepped(0., OPACITY_MIN, OPACITY_MAX, OPACITY_STEP), 20.);
+        assert_eq!(stepped(1., OPACITY_MIN, OPACITY_MAX, OPACITY_STEP), 90.);
     }
 }

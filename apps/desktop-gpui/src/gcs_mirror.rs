@@ -119,7 +119,16 @@ fn next_undecided(offered: &[PathBuf]) -> Option<PathBuf> {
         })
 }
 
-/// Asks "Send to film" or "Discard" for each stopped take not yet decided,
+/// What the after-Stop question (A-12.1) can answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Choice {
+    Send,
+    /// Kept on this machine and out of the film; Send later from the list.
+    KeepBack,
+    Discard,
+}
+
+/// Asks Send, Keep back or Discard for each stopped take not yet decided,
 /// one after another, on the main window (gpui prompts are window sheets).
 /// Runs after each stop and at app start, so a dialog closed or lost to a
 /// crash, which decides nothing, comes back then. Rescans after each answer,
@@ -135,21 +144,28 @@ pub fn ask(cx: &mut gpui::App) {
         // ask() runs on this same main thread, so no stop lands between the last scan and the reset.
         while let Some(take) = next_undecided(&offered) {
             offered.push(take.clone());
-            let name = take
+            let mut detail = take
                 .file_stem()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            for (shot, length) in crate::shots::shot_lengths(&take) {
+                detail.push_str(&match length {
+                    Some(length) => format!("\n{shot}: {length:.1} s"),
+                    None => format!("\n{shot}"),
+                });
+            }
             let receiver = cx.update(|cx| {
                 crate::app_windows::show_main_window(cx);
                 cx.activate(true);
                 main.update(cx, |_, window, cx| {
                     window.prompt(
                         gpui::PromptLevel::Info,
-                        "Send this take to the film?",
-                        Some(&name),
+                        cap_gcs_mirror::SEND_TITLE,
+                        Some(&detail),
                         &[
-                            gpui::PromptButton::ok("Send to film"),
-                            gpui::PromptButton::new("Discard"),
+                            gpui::PromptButton::ok(cap_gcs_mirror::SEND),
+                            gpui::PromptButton::new(cap_gcs_mirror::KEEP_BACK),
+                            gpui::PromptButton::new(cap_gcs_mirror::DISCARD),
                             gpui::PromptButton::cancel("Not now"),
                         ],
                         cx,
@@ -160,8 +176,9 @@ pub fn ask(cx: &mut gpui::App) {
                 break;
             };
             match receiver.await {
-                Ok(0) => decide(take, true),
-                Ok(1) => decide(take, false),
+                Ok(0) => decide(take, Choice::Send),
+                Ok(1) => decide(take, Choice::KeepBack),
+                Ok(2) => decide(take, Choice::Discard),
                 _ => {}
             }
         }
@@ -170,10 +187,12 @@ pub fn ask(cx: &mut gpui::App) {
     .detach();
 }
 
-/// Sends `send.json`, or discards the take from the bucket, on its own
-/// thread, retrying while the app runs until the bucket has it. A restart
-/// picks up a decision still unfinished (`resume_pending`).
-fn decide(take: PathBuf, send: bool) {
+/// Records Send or Keep back in `send.json` and uploads it, or discards the
+/// take from the bucket, on its own thread, retrying while the app runs until
+/// the bucket has it. A Send after Keep back replaces it; Keep back after
+/// Send changes nothing. A restart picks up an upload still unfinished
+/// (`resume_pending`).
+pub fn decide(take: PathBuf, choice: Choice) {
     let Some(config) = config() else {
         return;
     };
@@ -186,18 +205,18 @@ fn decide(take: PathBuf, send: bool) {
                 let Some(mut mirror) = open(config.clone(), &take) else {
                     return;
                 };
-                let done = if send {
-                    mirror.send_to_film()
-                } else {
-                    mirror.discard()
+                let done = match choice {
+                    Choice::Send => mirror.send_to_film(),
+                    Choice::KeepBack => mirror.decide(false).and_then(|_| mirror.upload_decision()),
+                    Choice::Discard => mirror.discard(),
                 };
                 let Err(error) = done else {
                     return;
                 };
-                tracing::error!(%error, take = %take.display(), send, "Mirror could not carry out the choice; retrying");
+                tracing::error!(%error, take = %take.display(), ?choice, "Mirror could not carry out the choice; retrying");
                 // The other choice was made first: this one can never land.
-                if (send && cap_gcs_mirror::discarded(&outbox))
-                    || (!send && outbox.join("send.json").is_file())
+                if (choice != Choice::Discard && cap_gcs_mirror::discarded(&outbox))
+                    || (choice == Choice::Discard && cap_gcs_mirror::sent(&outbox))
                 {
                     return;
                 }
@@ -207,18 +226,36 @@ fn decide(take: PathBuf, send: bool) {
         });
 }
 
-/// After a restart, finishes each Send and Discard still unfinished, then
+/// After a restart, uploads each Send or Keep back and finishes each Discard
+/// still unfinished, then
 /// uploading every stopped take not discarded.
 pub fn resume_pending() {
     let Some(config) = config() else {
         return;
     };
     // Decisions first, each on its own thread, so no take's long drain holds them up.
-    for take in takes(|outbox| outbox.join("send.json").is_file()) {
-        decide(take, true);
+    // Upload only: a Keep back stays one (never turned into a Send).
+    for take in takes(cap_gcs_mirror::decided) {
+        let config = config.clone();
+        let _ = std::thread::Builder::new()
+            .name("gcs-mirror-send".into())
+            .spawn(move || {
+                let mut wait = std::time::Duration::from_secs(5);
+                while let Some(mut mirror) = open(config.clone(), &take) {
+                    let Err(error) = mirror.upload_decision() else {
+                        return;
+                    };
+                    tracing::error!(%error, take = %take.display(), "Mirror could not upload the choice; retrying");
+                    if cap_gcs_mirror::discarded(&take.join("outbox")) {
+                        return;
+                    }
+                    std::thread::sleep(wait);
+                    wait = (wait * 2).min(std::time::Duration::from_secs(300));
+                }
+            });
     }
     for take in takes(cap_gcs_mirror::discard_pending) {
-        decide(take, false);
+        decide(take, Choice::Discard);
     }
     let pending =
         takes(|outbox| outbox.join("stop.json").is_file() && !cap_gcs_mirror::discarded(outbox));

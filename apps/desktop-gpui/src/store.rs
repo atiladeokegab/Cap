@@ -1421,6 +1421,9 @@ pub struct TeleprompterState {
     pub show_cue_markers: bool,
     pub mirror: bool,
     pub window_opacity_percent: u32,
+    /// The shot list's Running background, 20-90 (fork; A-12.3). The whole
+    /// window stays opaque so the text keeps full contrast.
+    pub running_opacity_percent: u32,
 }
 
 impl TeleprompterState {
@@ -1432,6 +1435,7 @@ impl TeleprompterState {
     pub const SHOW_CUE_MARKERS: &'static str = "showCueMarkers";
     pub const MIRROR: &'static str = "mirror";
     pub const WINDOW_OPACITY_PERCENT: &'static str = "windowOpacityPercent";
+    pub const RUNNING_OPACITY_PERCENT: &'static str = "runningOpacityPercent";
 
     pub fn load() -> Self {
         Self::from_section(&store_section(TELEPROMPTER))
@@ -1451,6 +1455,15 @@ impl TeleprompterState {
                 Self::WINDOW_OPACITY_PERCENT,
                 defaults.window_opacity_percent,
             ),
+            running_opacity_percent: u32_at(
+                map,
+                Self::RUNNING_OPACITY_PERCENT,
+                defaults.running_opacity_percent,
+            )
+            .clamp(
+                crate::shots::RUNNING_OPACITY_MIN,
+                crate::shots::RUNNING_OPACITY_MAX,
+            ),
         }
     }
 
@@ -1465,6 +1478,7 @@ impl TeleprompterState {
             Self::SHOW_CUE_MARKERS => Value::Bool(self.show_cue_markers),
             Self::MIRROR => Value::Bool(self.mirror),
             Self::WINDOW_OPACITY_PERCENT => Value::from(self.window_opacity_percent),
+            Self::RUNNING_OPACITY_PERCENT => Value::from(self.running_opacity_percent),
             _ => Value::Null,
         }
     }
@@ -1480,6 +1494,7 @@ impl Default for TeleprompterState {
             show_cue_markers: true,
             mirror: false,
             window_opacity_percent: 92,
+            running_opacity_percent: crate::shots::RUNNING_OPACITY_DEFAULT,
         }
     }
 }
