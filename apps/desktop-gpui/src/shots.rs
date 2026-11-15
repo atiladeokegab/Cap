@@ -21,6 +21,9 @@ pub const SHOTS_FILE: &str = "shots.json";
 pub const BUCKET_KEY: &str = "shotlist/current.json";
 /// The offline fallback, in the app-data dir.
 pub const LOCAL_FILE: &str = "shotlist.json";
+/// The list a take's marks were made against, beside `shots.json`: a later
+/// republished list (pick-ups) never changes what an old take's marks mean.
+pub const TAKE_LIST_FILE: &str = "shotlist.json";
 
 /// The bucket's list wins; offline, missing or malformed there, the local
 /// file. Returns the list, if any (none is the stock teleprompter), and a
@@ -59,7 +62,11 @@ pub struct Line {
 pub struct Shot {
     pub shot_id: String,
     pub title: String,
-    #[serde(default, deserialize_with = "present_string")]
+    #[serde(
+        default,
+        deserialize_with = "present_string",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub on_screen: Option<String>,
     pub lines: Vec<Line>,
     /// `"none"` turns generated zoom off over this shot.
@@ -71,15 +78,25 @@ pub struct Shot {
     pub zoom: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ShotList {
     /// Read only so a title that is not a string fails the parse.
-    #[serde(default, rename = "title", deserialize_with = "present_string")]
+    #[serde(
+        default,
+        rename = "title",
+        deserialize_with = "present_string",
+        skip_serializing_if = "Option::is_none"
+    )]
     _title: Option<String>,
     pub shots: Vec<Shot>,
     /// The film's what's-left checklist, checked apart from the shots so a
-    /// malformed one never blocks them.
-    #[serde(default, rename = "progress")]
+    /// malformed one never blocks them. A `null` one is kept, so it warns.
+    #[serde(
+        default,
+        rename = "progress",
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     raw_progress: Option<serde_json::Value>,
     #[serde(skip)]
     pub progress: Option<Progress>,
@@ -141,6 +158,13 @@ pub const MAX_LIST_BYTES: usize = 1 << 20;
 /// The contract lets an optional string be left out, never be `null`.
 fn present_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     String::deserialize(d).map(Some)
+}
+
+/// Any value that is there, `null` included.
+fn present_value<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(d).map(Some)
 }
 
 /// Parses and validates a `shotlist.json`, the rules of
@@ -307,6 +331,38 @@ pub fn zoomless(list: &ShotList, marks: &[ShotMark]) -> Vec<(u32, u64, Option<u6
         .collect()
 }
 
+/// [`zoomless`] for a take on disk: its marks against the list recorded
+/// with them. `live` is only asked for a take marked before takes recorded
+/// their list; a recorded list that is there but unreadable is an error,
+/// never replaced by a guess.
+pub fn take_zoomless(
+    take: &Path,
+    live: impl FnOnce() -> Option<ShotList>,
+) -> Result<Vec<(u32, u64, Option<u64>)>, String> {
+    let marks: Vec<ShotMark> = std::fs::read(take.join(SHOTS_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    if marks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let recorded = match std::fs::read(take.join(TAKE_LIST_FILE)) {
+        Ok(bytes) => Some(parse(&bytes).map_err(|error| format!("the take's {error}"))?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("the take's {TAKE_LIST_FILE}: {error}")),
+    };
+    Ok(recorded
+        .or_else(live)
+        .map_or_else(Vec::new, |list| zoomless(&list, &marks)))
+}
+
+/// The mirror uploads take files while recording: never let it read half.
+fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(&temp, path)
+}
+
 /// The loaded list, the shot on screen, and the marks written into the take.
 pub struct Shots {
     pub list: ShotList,
@@ -334,9 +390,11 @@ impl Shots {
 
     /// A newly read list: shown from its first shot before the take's first
     /// mark; once a shot is under way it waits for the take to end, so the
-    /// shot on screen never moves under the reader.
-    pub fn replace(&mut self, list: ShotList) {
-        if self.started {
+    /// shot on screen never moves under the reader. A read started during a
+    /// live take (Reload, not the take's own read at its start) waits too,
+    /// even before the first mark: the take keeps the list it started with.
+    pub fn replace(&mut self, list: ShotList, during_take: bool) {
+        if self.started || (during_take && self.take.is_some()) {
             self.pending = Some(list);
         } else {
             self.list = list;
@@ -467,11 +525,16 @@ impl Shots {
             time_ms,
             retake: action == Action::Retake,
         });
-        let path = take.join(SHOTS_FILE);
-        // The mirror uploads this file while recording: never let it read half.
-        let temp = path.with_extension("json.tmp");
-        std::fs::write(&temp, serde_json::to_vec_pretty(&self.marks)?)?;
-        std::fs::rename(&temp, &path)
+        // The list first, once: marks are never on disk without the list they
+        // mean, and a Retake on a reopened take never replaces it.
+        let recorded = take.join(TAKE_LIST_FILE);
+        if !recorded.exists() {
+            write_whole(&recorded, &serde_json::to_vec_pretty(&self.list)?)?;
+        }
+        write_whole(
+            &take.join(SHOTS_FILE),
+            &serde_json::to_vec_pretty(&self.marks)?,
+        )
     }
 }
 
@@ -715,12 +778,12 @@ mod tests {
         shots.follow(Some(&take));
         shots.mark(Action::Next, &take, (0, 100)).unwrap();
         shots.mark(Action::Next, &take, (0, 200)).unwrap();
-        shots.replace(pickup());
+        shots.replace(pickup(), true);
         assert_eq!(shots.current().shot_id, "demo");
         shots.follow(None);
         assert_eq!(shots.current().shot_id, "ask");
         // Between takes a new list shows at once, from its first shot.
-        shots.replace(list());
+        shots.replace(list(), true);
         assert_eq!(shots.current().shot_id, "intro");
         std::fs::remove_dir_all(&take).unwrap();
 
@@ -728,6 +791,60 @@ mod tests {
         let (old, new) = (reads.start(), reads.start());
         assert!(reads.land(new));
         assert!(!reads.land(old));
+    }
+
+    #[test]
+    fn a_reload_before_the_first_mark_keeps_the_list_the_take_started_with() {
+        let take = std::env::temp_dir().join(format!("cap-shots-early-{}", std::process::id()));
+        let ask =
+            || parse(br#"{"shots": [{"shot_id": "ask", "title": "Ask", "lines": []}]}"#).unwrap();
+        let mut shots = Shots::new(list());
+        shots.follow(Some(&take));
+        // The take's own read at its start shows at once.
+        shots.replace(ask(), false);
+        assert_eq!(shots.current().shot_id, "ask");
+        // Reload before the first mark waits for the take to end.
+        shots.replace(list(), true);
+        assert_eq!(shots.current().shot_id, "ask");
+        shots.follow(None);
+        assert_eq!(shots.current().shot_id, "intro");
+    }
+
+    #[test]
+    fn a_take_resolves_zoom_none_from_the_list_it_was_marked_against() {
+        let take = std::env::temp_dir().join(format!("cap-shots-zoomless-{}", std::process::id()));
+        std::fs::create_dir_all(&take).unwrap();
+        let recorded = parse(
+            br#"{"shots": [
+                {"shot_id": "intro", "title": "I", "on_screen": "Terminal", "lines": [], "zoom": "none"},
+                {"shot_id": "demo", "title": "D", "lines": []}
+            ]}"#,
+        )
+        .unwrap();
+        // The pick-ups republished since drop the opt-out.
+        let pickups = || {
+            Some(parse(br#"{"shots": [{"shot_id": "intro", "title": "I", "lines": []}]}"#).unwrap())
+        };
+        assert!(take_zoomless(&take, pickups).unwrap().is_empty());
+        let mut shots = Shots::new(recorded);
+        shots.follow(Some(&take));
+        shots.mark(Action::Next, &take, (0, 700)).unwrap();
+        assert_eq!(take_zoomless(&take, pickups).unwrap(), [(0, 700, None)]);
+        // Reopened on the pick-ups, a Retake keeps the list the take began with.
+        let mut reopened = Shots::new(pickups().unwrap());
+        reopened.follow(Some(&take));
+        reopened.mark(Action::Retake, &take, (0, 900)).unwrap();
+        assert_eq!(
+            take_zoomless(&take, pickups).unwrap(),
+            [(0, 700, Some(900)), (0, 900, None)]
+        );
+        // A damaged list is refused, never swapped for the live one.
+        std::fs::write(take.join(TAKE_LIST_FILE), b"{\"shots\":").unwrap();
+        assert!(take_zoomless(&take, pickups).is_err());
+        // A take from before takes kept their list falls back to the live one.
+        std::fs::remove_file(take.join(TAKE_LIST_FILE)).unwrap();
+        assert!(take_zoomless(&take, pickups).unwrap().is_empty());
+        std::fs::remove_dir_all(&take).unwrap();
     }
 
     #[test]
@@ -758,6 +875,7 @@ mod tests {
         );
         assert!(good.warning.is_none());
         for bad in [
+            "null",
             r#""1 of 3""#,
             r#"{"shots": [], "criteria": [{"id": "w", "name": "W"}]}"#,
         ] {

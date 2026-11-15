@@ -19,7 +19,7 @@ fn stop_returns_only_after_the_whole_take_is_frozen() {
     let body = vec![7u8; 8 << 20];
     fs::write(dir.join("take").join(audio), &body).unwrap();
     let worker = mirror(&dir, &endpoint).spawn(NEVER).unwrap();
-    worker.stop(1, Duration::ZERO).unwrap();
+    worker.stop(1).unwrap();
     // The remux may now delete the take; the outbox must already hold it.
     assert!(dir.join("outbox/stop.json").is_file());
     assert!(fs::read(dir.join("outbox").join(audio)).unwrap() == body);
@@ -40,7 +40,7 @@ fn a_failed_freeze_skips_the_take_and_the_remux_still_runs() {
         return; // Running as root: permissions cannot make a file unreadable.
     }
     let worker = mirror(&dir, &endpoint).spawn(NEVER).unwrap();
-    assert!(worker.stop(1, Duration::from_secs(5)).is_err());
+    assert!(worker.stop(1).is_err());
     // The take is skipped, visibly, and Cap's files are as Cap left them.
     let marker = fs::read_to_string(dir.join("outbox/mirror-failed.json")).unwrap();
     assert!(marker.contains("keyboard.bin"));

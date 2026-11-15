@@ -2169,10 +2169,14 @@ pub struct ClipActivity {
 
 /// The generate button's zoom track (fork): [`crate::natural_zoom`] over
 /// every clip box's activity, mapped onto the timeline like the stock pass,
-/// with a cut at each clip box that no zoom crosses.
+/// with a cut at each clip box that no zoom crosses. Each zoom holds on its
+/// work region (manual centre), never Auto's cursor-follow: a pointer that
+/// wanders off the field being typed in must not take the zoom with it.
+/// `crop` maps the cursor's display UV into the cropped frame's.
 pub fn generate_natural_zoom_for_timeline(
     clips: &[ClipActivity],
     timeline: &TimelineConfiguration,
+    crop: Option<cap_rendering::CursorCropMap>,
 ) -> Vec<ZoomSegment> {
     use crate::natural_zoom::{Click, Move, natural_zoom};
     let holds = timeline.hold_windows();
@@ -2236,7 +2240,18 @@ pub fn generate_natural_zoom_for_timeline(
     }
     natural_zoom(&moves, &clicks, &keys, timeline.duration() * 1000.0, &quiet)
         .into_iter()
-        .map(|zoom| auto_zoom_segment(zoom.start_ms / 1000.0, zoom.end_ms / 1000.0, zoom.amount))
+        .map(|zoom| {
+            // shortcut: the project's base crop only; a style segment's own
+            // crop is not applied, upgrade if those crops become common.
+            let (x, y) = crop.map_or((zoom.x, zoom.y), |crop| crop.map(zoom.x, zoom.y));
+            ZoomSegment {
+                mode: ZoomMode::Manual {
+                    x: x.clamp(0.0, 1.0) as f32,
+                    y: y.clamp(0.0, 1.0) as f32,
+                },
+                ..auto_zoom_segment(zoom.start_ms / 1000.0, zoom.end_ms / 1000.0, zoom.amount)
+            }
+        })
         .collect()
 }
 
@@ -3659,6 +3674,7 @@ mod tests {
         let zooms = generate_natural_zoom_for_timeline(
             &[activity(vec![(0.0, None)]), activity(Vec::new())],
             timeline,
+            None,
         );
         // Clip 1 starts at 10 s: in 300 ms before its first click, out 2 s
         // after its last; clip 0's shot says `zoom: none`.
@@ -3670,11 +3686,57 @@ mod tests {
         let both = generate_natural_zoom_for_timeline(
             &[activity(Vec::new()), activity(Vec::new())],
             timeline,
+            None,
         );
         // Without it clip 0 zooms, and the 35% budget leaves clip 1 too
         // little for a second.
         let starts: Vec<_> = both.iter().map(|zoom| zoom.start).collect();
         assert_eq!(starts, vec![0.7]);
+    }
+
+    /// A click into a field, then typing while the pointer wanders off: the
+    /// zoom holds on the field (manual centre), never follows the pointer,
+    /// and lands where the field is in a cropped frame.
+    #[test]
+    fn natural_zoom_holds_on_the_work_not_the_wandering_pointer() {
+        let project = two_clip_config();
+        let timeline = project.timeline.as_ref().unwrap();
+        let at = |time_ms, x, y| CursorMoveEvent {
+            active_modifiers: Vec::new(),
+            cursor_id: String::new(),
+            time_ms,
+            x,
+            y,
+        };
+        let typing = ClipActivity {
+            moves: vec![at(0.0, 0.3, 0.4), at(1500.0, 0.9, 0.9)],
+            clicks: vec![click(1000.0)],
+            keys_ms: (0..15).map(|n| 1200.0 + f64::from(n) * 200.0).collect(),
+            zoomless_ms: Vec::new(),
+        };
+        let centres = |crop| {
+            generate_natural_zoom_for_timeline(
+                &[typing.clone(), ClipActivity::default()],
+                timeline,
+                crop,
+            )
+            .into_iter()
+            .map(|zoom| zoom.mode)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(centres(None), [ZoomMode::Manual { x: 0.3, y: 0.4 }]);
+        // The right half of a 1920x1080 display: x 0.3 is 0.1 of the crop.
+        let crop = cap_rendering::CursorCropMap::from_crop(
+            &cap_project::Crop {
+                position: XY::new(480, 0),
+                size: XY::new(960, 1080),
+            },
+            XY::new(1920, 1080),
+        );
+        let &[ZoomMode::Manual { x, y }] = centres(crop).as_slice() else {
+            panic!("one manual zoom");
+        };
+        assert!((x - 0.1).abs() < 1e-6 && (y - 0.4).abs() < 1e-6, "{x} {y}");
     }
 
     /// Two clicks a second apart merge into one segment, a distant one stands

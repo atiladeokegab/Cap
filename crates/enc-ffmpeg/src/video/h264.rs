@@ -76,6 +76,8 @@ impl H264EncoderBuilder {
     pub const QUALITY_BPP: f32 = 0.3;
     pub const ULTRA_BPP: f32 = 1.0;
     pub const INSTANT_MODE_BPP: f32 = 0.15;
+    /// Studio "Smaller files": about 4.8 Mbit/s at 1600x1000 (`get_bitrate` counts 30 fps or more).
+    pub const COMPATIBILITY_BPP: f32 = 0.1;
 
     pub fn new(input_config: VideoInfo) -> Self {
         Self {

@@ -1,0 +1,268 @@
+//! While a take drains, `progress.json` reports the bytes sent so far,
+//! including the part of a single large PUT still on the wire.
+
+mod common;
+
+use common::{folder, mirror};
+use std::{
+    fs,
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpListener,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
+/// Like `common::bucket`, but keeps each body, reads a camera PUT's body
+/// 16 KB per `pace`, as a slow uplink would carry it, and holds its reply
+/// for `slow`, as a large upload would take.
+fn slow_bucket(slow: Duration, pace: Duration) -> (String, Arc<Mutex<Vec<(String, Vec<u8>)>>>) {
+    paced_bucket(slow, pace, false)
+}
+
+/// `slow_bucket`, and with `drop_first` the first camera PUT is cut off
+/// halfway through its body, as a dropped connection would.
+fn paced_bucket(
+    slow: Duration,
+    pace: Duration,
+    drop_first: bool,
+) -> (String, Arc<Mutex<Vec<(String, Vec<u8>)>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let seen = Arc::new(Mutex::new(vec![]));
+    let log = seen.clone();
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(!drop_first));
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let (log, dropped) = (log.clone(), dropped.clone());
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let path = line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                let mut length = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                let camera = path.ends_with("/camera.mp4");
+                let cut = camera && !dropped.swap(true, std::sync::atomic::Ordering::Relaxed);
+                for (i, chunk) in body
+                    .chunks_mut(if camera { 16 * 1024 } else { length.max(1) })
+                    .enumerate()
+                {
+                    if cut && i * 16 * 1024 >= length / 2 {
+                        return; // the connection drops mid-body
+                    }
+                    if reader.read_exact(chunk).is_err() {
+                        return; // the client gave up on this PUT
+                    }
+                    if camera {
+                        std::thread::sleep(pace);
+                    }
+                }
+                if camera {
+                    std::thread::sleep(slow);
+                }
+                log.lock().unwrap().push((path, body));
+                reader
+                    .into_inner()
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .unwrap();
+            });
+        }
+    });
+    (endpoint, seen)
+}
+
+#[test]
+fn progress_reports_the_bytes_sent_while_a_large_put_is_in_flight() {
+    let (endpoint, seen) = slow_bucket(Duration::from_millis(600), Duration::ZERO);
+    let dir = folder("progress");
+    let segment = dir.join("take/content/segments/segment-0");
+    fs::write(dir.join("take/recording-meta.json"), b"{}").unwrap();
+    fs::write(segment.join("display.mp4"), vec![1u8; 1000]).unwrap();
+    fs::write(segment.join("camera.mp4"), vec![2u8; 5000]).unwrap();
+    let mut mirror = mirror(&dir, &endpoint);
+    mirror.set_progress_every(Duration::from_millis(100));
+    let report = mirror.stop(1, Duration::from_secs(30));
+    assert!(report.drained, "{report:?}");
+    std::thread::sleep(Duration::from_millis(300)); // a heartbeat in flight may still land
+
+    let seen = seen.lock().unwrap();
+    let paths: Vec<&str> = seen.iter().map(|(path, _)| path.as_str()).collect();
+    assert_eq!(
+        paths[0], "/b/takes/t/stop.json",
+        "progress never leads the take: {paths:?}"
+    );
+    let progress: Vec<serde_json::Value> = seen
+        .iter()
+        .filter(|(path, _)| path == "/b/takes/t/progress.json")
+        .map(|(_, body)| serde_json::from_slice(body).unwrap())
+        .collect();
+    let total = 2 + 1000 + 5000;
+    assert!(
+        progress.iter().all(|beat| beat["total"] == total),
+        "{progress:?}"
+    );
+    let sent: Vec<u64> = progress
+        .iter()
+        .map(|beat| beat["sent"].as_u64().unwrap())
+        .collect();
+    // The camera's bytes count once streamed, before its PUT returns: a beat
+    // logged ahead of the camera's own entry already holds them.
+    let camera = seen
+        .iter()
+        .position(|(path, _)| path.ends_with("/camera.mp4"))
+        .unwrap();
+    assert!(
+        seen[..camera]
+            .iter()
+            .any(|(path, body)| path.ends_with("/progress.json")
+                && serde_json::from_slice::<serde_json::Value>(body).unwrap()["sent"]
+                    .as_u64()
+                    .unwrap()
+                    >= 1002 + 5000),
+        "{sent:?}"
+    );
+    assert!(sent.windows(2).all(|pair| pair[0] <= pair[1]), "{sent:?}");
+    let ledger = fs::read_to_string(dir.join("outbox/uploaded.jsonl")).unwrap();
+    assert!(!ledger.contains("progress.json"));
+    assert!(
+        !fs::read_to_string(dir.join("outbox/stop.json"))
+            .unwrap()
+            .contains("progress")
+    );
+}
+
+#[test]
+fn no_progress_is_sent_once_the_drain_has_returned() {
+    let (endpoint, seen) = slow_bucket(Duration::ZERO, Duration::ZERO);
+    let dir = folder("progress-quiet");
+    fs::write(dir.join("take/recording-meta.json"), b"{}").unwrap();
+    let mut mirror = mirror(&dir, &endpoint);
+    mirror.set_progress_every(Duration::from_millis(50));
+    assert!(mirror.stop(1, Duration::from_secs(30)).drained);
+    let start = Instant::now();
+    std::thread::sleep(Duration::from_millis(400));
+    let after = seen.lock().unwrap().len();
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        after,
+        "still beating {:?} after the drain",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn a_put_that_outlasts_the_drain_deadline_still_lands_once() {
+    let (endpoint, seen) = slow_bucket(Duration::from_millis(1500), Duration::ZERO);
+    let dir = folder("progress-outlasts");
+    let segment = dir.join("take/content/segments/segment-0");
+    fs::write(dir.join("take/recording-meta.json"), b"{}").unwrap();
+    fs::write(segment.join("camera.mp4"), vec![2u8; 5000]).unwrap();
+    let mut mirror = mirror(&dir, &endpoint);
+    mirror.stop(1, Duration::from_millis(800));
+    // the camera was not cut at the deadline; what is left is the manifest
+    assert_eq!(mirror.drain(None), Ok(true));
+
+    let seen = seen.lock().unwrap();
+    let count = |key: &str| seen.iter().filter(|(path, _)| path.ends_with(key)).count();
+    assert_eq!(count("/camera.mp4"), 1, "sent from its first byte again");
+    // a 1 ms manifest PUT past the deadline may reach the bucket too; it is the same body
+    assert!(seen.last().unwrap().0.ends_with("/take-manifest.json"));
+}
+
+#[test]
+fn a_put_whose_bytes_stop_moving_fails_at_the_stall_not_the_overall_cap() {
+    // The bucket stops reading after the first 16 KB; 16 MB outlasts every
+    // buffer between, so the body still has bytes to give when it stalls.
+    let (endpoint, _) = slow_bucket(Duration::ZERO, Duration::from_secs(3600));
+    let dir = folder("progress-stall");
+    let segment = dir.join("take/content/segments/segment-0");
+    fs::write(dir.join("take/recording-meta.json"), b"{}").unwrap();
+    fs::write(segment.join("camera.mp4"), vec![2u8; 16 << 20]).unwrap();
+    let mut mirror = mirror(&dir, &endpoint);
+    mirror.set_stall(Duration::from_millis(300));
+    let start = Instant::now();
+    // The camera's overall cap is 120 s; only the stall can end it this soon.
+    assert!(!mirror.stop(1, Duration::from_millis(500)).drained);
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn a_slow_put_that_keeps_moving_outlasts_the_stall() {
+    // About 256 KB/s for 6 MB: some 24 s on the wire. A socket wakes its
+    // writer only once a share of its buffer drains, so chunks are taken a
+    // second or two apart; the stall sits above that. The buffered tail
+    // (megabytes on loopback) and the 6 s reply wait take no chunk at all.
+    let (endpoint, seen) = slow_bucket(Duration::from_secs(6), Duration::from_millis(62));
+    let dir = folder("progress-trickle");
+    let segment = dir.join("take/content/segments/segment-0");
+    fs::write(dir.join("take/recording-meta.json"), b"{}").unwrap();
+    fs::write(segment.join("camera.mp4"), vec![2u8; 6 << 20]).unwrap();
+    let mut mirror = mirror(&dir, &endpoint);
+    mirror.set_stall(Duration::from_secs(5));
+    let report = mirror.stop(1, Duration::from_secs(120));
+    assert!(report.drained, "{report:?}");
+    let seen = seen.lock().unwrap();
+    let cameras = seen
+        .iter()
+        .filter(|(path, _)| path.ends_with("/camera.mp4"))
+        .count();
+    assert_eq!(cameras, 1, "sent from its first byte again");
+}
+
+#[test]
+fn a_failed_put_never_makes_the_published_progress_go_down() {
+    // The first camera PUT streams its bytes, then the connection drops; the
+    // retry a second later succeeds. `sent` falls back meanwhile, but no beat
+    // may report less than one before it, or the VM sees no progress.
+    let (endpoint, seen) = paced_bucket(Duration::ZERO, Duration::from_millis(40), true);
+    let dir = folder("progress-retry");
+    let segment = dir.join("take/content/segments/segment-0");
+    fs::write(dir.join("take/recording-meta.json"), b"{}").unwrap();
+    fs::write(segment.join("camera.mp4"), vec![2u8; 320 * 1024]).unwrap();
+    let mut mirror = mirror(&dir, &endpoint);
+    mirror.set_progress_every(Duration::from_millis(50));
+    let report = mirror.stop(1, Duration::from_secs(30));
+    assert!(report.drained, "{report:?}");
+
+    let seen = seen.lock().unwrap();
+    let sent: Vec<u64> = seen
+        .iter()
+        .filter(|(path, _)| path.ends_with("/progress.json"))
+        .map(|(_, body)| {
+            serde_json::from_slice::<serde_json::Value>(body).unwrap()["sent"]
+                .as_u64()
+                .unwrap()
+        })
+        .collect();
+    let cameras = seen
+        .iter()
+        .filter(|(path, _)| path.ends_with("/camera.mp4"))
+        .count();
+    assert_eq!(cameras, 1, "the first PUT was cut off, the retry landed");
+    assert!(
+        sent.iter().any(|&n| n > 2),
+        "a beat saw the failed PUT's bytes: {sent:?}"
+    );
+    assert!(sent.windows(2).all(|pair| pair[0] <= pair[1]), "{sent:?}");
+}

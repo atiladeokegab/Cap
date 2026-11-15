@@ -16,11 +16,13 @@ use std::{
     fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, LazyLock, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 
@@ -34,8 +36,83 @@ const AUDIO_DELTA: u64 = 256 * 1024;
 const STOP: &str = "stop.json";
 const MANIFEST: &str = "take-manifest.json";
 const LEDGER: &str = "uploaded.jsonl";
+/// Bytes sent of the frozen take, PUT while it drains so the VM can tell a
+/// slow upload from a dead one. Never in the ledger, `stop.json` or the manifest.
+const PROGRESS: &str = "progress.json";
+const PROGRESS_EVERY: Duration = Duration::from_secs(15);
+/// A take file's PUT fails once no bytes have moved for this long, however
+/// long the whole upload runs.
+const STALL: Duration = Duration::from_secs(60);
+/// 1 Mbit/s: a take file's PUT may take as long as this uplink would need.
+const BYTES_PER_SECOND_FLOOR: u64 = 125_000;
 /// Written instead of `stop.json` when the freeze fails.
 const FAILED: &str = "mirror-failed.json";
+/// The presenter's Send (film's send.json contract): `stop.json` says
+/// `send_required`, so the film watcher builds nothing until this lands. A
+/// control file, kept in the outbox and never listed in `stop.json`.
+const SEND: &str = "send.json";
+pub const CAP_SEND_VERSION: &str = "1";
+/// Local only: the presenter discarded the take, so nothing of it is sent
+/// again and what went up is deleted. Holds `{"cleaned": false}` until a LIST
+/// of the take's folder in the bucket comes back empty.
+const DISCARDED: &str = "discarded.json";
+
+pub fn discarded(outbox: &Path) -> bool {
+    outbox.join(DISCARDED).is_file()
+}
+
+/// Per outbox: requests to the bucket running now, and requests ever started.
+/// A request registers before it reads the Discard mark, so one the mark
+/// does not stop is always seen here.
+// shortcut: per process; a second process mirroring the same take is not seen.
+static IN_FLIGHT: LazyLock<Mutex<HashMap<PathBuf, (usize, u64)>>> = LazyLock::new(Default::default);
+
+struct InFlight(PathBuf);
+
+impl InFlight {
+    fn start(outbox: &Path) -> Self {
+        let mut flights = IN_FLIGHT.lock().unwrap();
+        let (running, started) = flights.entry(outbox.to_path_buf()).or_default();
+        *running += 1;
+        *started += 1;
+        Self(outbox.to_path_buf())
+    }
+
+    /// How many requests of the take ever started, if none is running now.
+    fn quiet(outbox: &Path) -> Option<u64> {
+        match IN_FLIGHT.lock().unwrap().get(outbox) {
+            Some((0, started)) => Some(*started),
+            Some(_) => None,
+            None => Some(0),
+        }
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if let Some((running, _)) = IN_FLIGHT.lock().unwrap().get_mut(&self.0) {
+            *running -= 1;
+        }
+    }
+}
+
+/// Discarded, but the bucket may still hold some of it: call `discard` again.
+pub fn discard_pending(outbox: &Path) -> bool {
+    fs::read(outbox.join(DISCARDED))
+        .ok()
+        .is_some_and(|body| !body.windows(14).any(|w| w == br#""cleaned":true"#))
+}
+
+/// A take stopped by this fork that is neither sent nor discarded. Takes from
+/// a fork before the choice (no `send_required`) are never asked about.
+pub fn undecided(outbox: &Path) -> bool {
+    !outbox.join(SEND).is_file()
+        && !discarded(outbox)
+        && fs::read(outbox.join(STOP))
+            .ok()
+            .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
+            .is_some_and(|stop| stop["send_required"] == true)
+}
 
 /// The local config file in the app data folder; the mirror is off without it.
 #[derive(Clone, Deserialize)]
@@ -64,6 +141,91 @@ impl Config {
             .inspect_err(|error| tracing::warn!(%error, "Mirror config is unreadable; mirror off"))
             .ok()
     }
+
+    /// When `path` is missing, moves a downloaded config from `downloads` into
+    /// it: `mirror.json`, else the newest browser-renamed `mirror*.json`, the
+    /// first of those that parses. It is copied then removed so no secret is
+    /// left behind, and an existing `path` is never overwritten. A failed copy
+    /// leaves no partial `path` and keeps the download. Values are never logged.
+    pub fn adopt(path: &Path, downloads: &Path) {
+        adopt_with(path, downloads, |file, bytes| file.write_all(bytes));
+    }
+}
+
+/// [`Config::adopt`] with the write injectable, so a test can fail it.
+fn adopt_with(
+    path: &Path,
+    downloads: &Path,
+    write: impl FnOnce(&mut fs::File, &[u8]) -> io::Result<()>,
+) {
+    if path.exists() {
+        return;
+    }
+    let mut candidates: Vec<(PathBuf, Option<std::time::SystemTime>)> = fs::read_dir(downloads)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.starts_with("mirror") && name.ends_with(".json")
+        })
+        .map(|entry| {
+            let modified = entry.metadata().and_then(|meta| meta.modified()).ok();
+            (entry.path(), modified)
+        })
+        .collect();
+    // Plain `mirror.json` first, then the renamed ones newest first.
+    candidates.sort_by_key(|(found, modified)| {
+        (
+            found.file_name().is_none_or(|name| name != "mirror.json"),
+            std::cmp::Reverse(*modified),
+        )
+    });
+    let Some((found, bytes)) = candidates.into_iter().find_map(|(found, _)| {
+        let bytes = fs::read(&found).ok()?;
+        let valid = serde_json::from_slice::<Config>(&bytes).is_ok_and(|config| {
+            !config.bucket.is_empty()
+                && !config.access_key.is_empty()
+                && !config.secret_key.is_empty()
+        });
+        if !valid {
+            // The parse error can quote a value, so it is not logged.
+            tracing::warn!(file = %found.display(), "Downloaded mirror config is invalid (needs bucket, hmac_access_id, hmac_secret); left where it is");
+            return None;
+        }
+        Some((found, bytes))
+    }) else {
+        return;
+    };
+    let written = path
+        .parent()
+        .map_or(Ok(()), fs::create_dir_all)
+        .and_then(|()| {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            // It holds a credential: owner-only, whatever the umask.
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            options.open(path)
+        })
+        .and_then(|mut file| {
+            let result = write(&mut file, &bytes);
+            drop(file);
+            if result.is_err() {
+                // A partial file would pass the exists check and keep the mirror off for good.
+                let _ = fs::remove_file(path);
+            }
+            result
+        });
+    if let Err(error) = written {
+        tracing::warn!(%error, to = %path.display(), "Could not move the downloaded mirror config");
+        return;
+    }
+    if let Err(error) = fs::remove_file(&found) {
+        tracing::warn!(%error, file = %found.display(), "Mirror config copied, but the download could not be removed");
+        return;
+    }
+    tracing::info!(from = %found.display(), to = %path.display(), "Moved the downloaded mirror config into app data");
 }
 
 #[derive(Debug)]
@@ -97,6 +259,15 @@ pub struct Mirror {
     client: Client,
     /// Object name under `prefix` -> SHA-256 of the accepted body.
     uploaded: HashMap<String, String>,
+    /// Bytes of the frozen take in the bucket, counted as each PUT streams.
+    sent: Arc<AtomicU64>,
+    /// The highest `sent` published: a failed PUT's bytes drop out of `sent`,
+    /// but the VM reads only a rise as progress, so the beat never goes lower.
+    published: Arc<AtomicU64>,
+    progress_every: Duration,
+    stall: Duration,
+    /// Made on first use, on the thread that uploads, never inside Cap's runtime.
+    streaming: Option<(tokio::runtime::Runtime, reqwest::Client)>,
 }
 
 impl Mirror {
@@ -130,11 +301,33 @@ impl Mirror {
                 .build()
                 .map_err(io::Error::other)?,
             uploaded,
+            sent: Arc::new(AtomicU64::new(0)),
+            published: Arc::new(AtomicU64::new(0)),
+            progress_every: PROGRESS_EVERY,
+            stall: STALL,
+            streaming: None,
         })
     }
 
     pub fn set_endpoint(&mut self, endpoint: &str) {
         self.endpoint = endpoint.trim_end_matches('/').to_string();
+    }
+
+    pub fn set_progress_every(&mut self, every: Duration) {
+        self.progress_every = every;
+    }
+
+    pub fn set_stall(&mut self, stall: Duration) {
+        self.stall = stall;
+    }
+
+    fn signer(&self) -> sigv4::Key<'_> {
+        sigv4::Key {
+            access_key: &self.config.access_key,
+            secret_key: &self.config.secret_key,
+            region: &self.config.region,
+            service: "s3",
+        }
     }
 
     fn url(&self, key: &str) -> Result<Url, String> {
@@ -150,20 +343,119 @@ impl Mirror {
         body: Vec<u8>,
         timeout: Duration,
     ) -> Result<Vec<u8>, String> {
-        let signer = sigv4::Key {
-            access_key: &self.config.access_key,
-            secret_key: &self.config.secret_key,
-            region: &self.config.region,
-            service: "s3",
-        };
         request(
             &self.client,
-            &signer,
+            &self.signer(),
             method,
             &self.url(key)?,
             body,
             timeout,
         )
+    }
+
+    /// PUTs one of the take's own files, counting its bytes into `sent` as the
+    /// connection takes them. Fails after `timeout` in all, or once no bytes
+    /// have moved for `stall` while the body still has bytes to give: a whole
+    /// camera.mp4 can need many minutes. Its buffered tail and the response
+    /// wait move no chunk, so only `timeout` bounds them.
+    fn put_counted(&mut self, key: &str, body: Vec<u8>, timeout: Duration) -> Result<(), String> {
+        let url = self.url(key)?;
+        let headers = signed(&self.signer(), "PUT", &url, &body)?;
+        let moved = Arc::new(Mutex::new(Some(Instant::now())));
+        let length = body.len();
+        let body = Counted {
+            body: body.into(),
+            sent: self.sent.clone(),
+            moved: moved.clone(),
+        };
+        let stall = self.stall;
+        let (runtime, client) = match &mut self.streaming {
+            Some(streaming) => streaming,
+            empty => {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                let client = reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(10))
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                empty.insert((runtime, client))
+            }
+        };
+        let mut request = client
+            .put(url.clone())
+            .timeout(timeout)
+            .header("content-length", length)
+            .body(reqwest::Body::wrap(body));
+        for (name, value) in &headers {
+            request = request.header(name, value);
+        }
+        runtime.block_on(async {
+            let mut response = Box::pin(async {
+                let response = request.send().await?;
+                Ok::<_, reqwest::Error>((response.status(), response.bytes().await?))
+            });
+            loop {
+                match tokio::time::timeout(stall.min(Duration::from_secs(1)), &mut response).await {
+                    Ok(Ok((status, _))) if status.is_success() => return Ok(()),
+                    Ok(Ok((status, _))) => return Err(format!("PUT {}: {status}", url.path())),
+                    Ok(Err(error)) => return Err(error.to_string()),
+                    Err(_)
+                        if moved
+                            .lock()
+                            .unwrap()
+                            .is_some_and(|at| at.elapsed() >= stall) =>
+                    {
+                        return Err(format!("PUT {}: no bytes moved for {stall:?}", url.path()));
+                    }
+                    Err(_) => {}
+                }
+            }
+        })
+    }
+
+    /// PUTs `progress.json` every `progress_every` until the returned sender
+    /// drops; the first one after `stop.json`, so it never leads the take.
+    fn heartbeat(&self, total: u64) -> mpsc::Sender<()> {
+        let (stop, stopped) = mpsc::channel::<()>();
+        let (client, sent, every) = (self.client.clone(), self.sent.clone(), self.progress_every);
+        let published = self.published.clone();
+        let (config, url) = (self.config.clone(), self.url(PROGRESS));
+        let outbox = self.outbox.clone();
+        std::thread::spawn(move || {
+            let Ok(url) = url else { return };
+            let signer = sigv4::Key {
+                access_key: &config.access_key,
+                secret_key: &config.secret_key,
+                region: &config.region,
+                service: "s3",
+            };
+            while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(every) {
+                let _flight = InFlight::start(&outbox);
+                if discarded(&outbox) {
+                    break;
+                }
+                let now = sent.load(Ordering::Relaxed);
+                let body = json!({ "sent": published.fetch_max(now, Ordering::Relaxed).max(now), "total": total });
+                if let Err(error) = request(
+                    &client,
+                    &signer,
+                    "PUT",
+                    &url,
+                    body.to_string().into_bytes(),
+                    every,
+                ) {
+                    tracing::warn!(%error, "Progress upload failed");
+                }
+                // Discarded while this beat ran: take it back out.
+                if discarded(&outbox) {
+                    let _ = request(&client, &signer, "DELETE", &url, Vec::new(), every);
+                    break;
+                }
+            }
+        });
+        stop
     }
 
     pub fn get(&self, key: &str) -> Result<Vec<u8>, String> {
@@ -188,7 +480,22 @@ impl Mirror {
             return Ok(false);
         }
         let size = body.len();
-        self.send("PUT", key, body, timeout)?;
+        let _flight = InFlight::start(&self.outbox);
+        if discarded(&self.outbox) {
+            return Err("the take was discarded".into());
+        }
+        let put = if key == STOP || key == MANIFEST {
+            self.send("PUT", key, body, timeout).map(|_| ())
+        } else {
+            // only the take's own files count as progress
+            self.put_counted(key, body, timeout)
+        };
+        // Discarded while this PUT ran: take it back out, even if its response was lost.
+        if discarded(&self.outbox) {
+            self.delete(key)?;
+            return Err("the take was discarded".into());
+        }
+        put?;
         let line = json!({ "key": key, "size": size, "sha256": sha }).to_string() + "\n";
         let mut ledger = fs::OpenOptions::new()
             .create(true)
@@ -228,8 +535,11 @@ impl Mirror {
         let mut sidecars = vec![
             self.take.join("shots.json"),
             self.take.join("windows.jsonl"),
+            self.take.join("recording-meta.json"),
+            self.take.join("project-config.json"),
         ];
         for segment in &segments {
+            sidecars.push(segment.join("start-times.json"));
             sidecars.push(segment.join("cursor.json"));
             sidecars.push(segment.join("keyboard.bin"));
         }
@@ -344,7 +654,11 @@ impl Mirror {
         if !errors.is_empty() {
             return Err(format!("could not freeze {}", errors.join("; ")));
         }
-        let stop = json!({ "stopped_at_unix_ms": stopped_at_unix_ms, "expected_files": listed });
+        let stop = json!({
+            "send_required": true,
+            "stopped_at_unix_ms": stopped_at_unix_ms,
+            "expected_files": listed,
+        });
         let stop = serde_json::to_vec_pretty(&stop).expect("JSON value serializes");
         write_atomic(&self.outbox.join(STOP), &stop).map_err(|e| format!("write {STOP}: {e}"))
     }
@@ -374,12 +688,119 @@ impl Mirror {
         }
     }
 
+    /// The presenter's Send: PUTs `send.json`, which lets the film watcher
+    /// build the take once its manifest lands. A retry re-sends the first
+    /// decision unchanged; a discarded take is never sent.
+    pub fn send_to_film(&mut self) -> Result<(), String> {
+        if discarded(&self.outbox) {
+            return Err("the take was discarded".into());
+        }
+        let path = self.outbox.join(SEND);
+        let body = match fs::read(&path) {
+            Ok(body) => body,
+            Err(_) => {
+                let choice = json!({
+                    "send": true,
+                    "decided_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    "cap_send_version": CAP_SEND_VERSION,
+                });
+                let body = serde_json::to_vec_pretty(&choice).expect("JSON value serializes");
+                write_atomic(&path, &body).map_err(|e| format!("write {SEND}: {e}"))?;
+                body
+            }
+        };
+        self.put(SEND, body, Duration::from_secs(30)).map(|_| ())
+    }
+
+    /// The presenter's Discard: marks the take so nothing more of it goes up,
+    /// then deletes every object in its bucket folder. `Err` leaves it
+    /// pending (`discard_pending`); call again until `Ok`. A sent take stays sent.
+    pub fn discard(&mut self) -> Result<(), String> {
+        if self.outbox.join(SEND).is_file() {
+            return Err("the take is already sent to film".into());
+        }
+        if !discard_pending(&self.outbox) && discarded(&self.outbox) {
+            return Ok(());
+        }
+        write_atomic(&self.outbox.join(DISCARDED), br#"{"cleaned":false}"#)
+            .map_err(|e| format!("write {DISCARDED}: {e}"))?;
+        // Listed after the mark: a PUT that lands later deletes itself (put_hashed, heartbeat).
+        let folder = format!("{}/", self.prefix);
+        for _ in 0..10 {
+            // An empty LIST proves the folder empty only if no request of the
+            // take ran at any point from before it was sent until it answered.
+            let before = InFlight::quiet(&self.outbox);
+            let keys = self.list(&folder)?;
+            if keys.is_empty() {
+                if before.is_none() || InFlight::quiet(&self.outbox) != before {
+                    return Err("an upload of the take ran during the check".into());
+                }
+                return write_atomic(&self.outbox.join(DISCARDED), br#"{"cleaned":true}"#)
+                    .map_err(|e| format!("write {DISCARDED}: {e}"));
+            }
+            for key in keys {
+                // Only this take's own folder, never a path that climbs out of it.
+                let relative = key
+                    .strip_prefix(&folder)
+                    .filter(|relative| {
+                        !relative.is_empty()
+                            && relative
+                                .split('/')
+                                .all(|part| !matches!(part, "" | "." | ".."))
+                    })
+                    .ok_or_else(|| format!("the bucket listed {key:?} outside the take"))?;
+                self.delete(relative)?;
+            }
+        }
+        Err("the take's folder in the bucket keeps refilling".into())
+    }
+
+    /// Every object name in the bucket under `prefix` (one page, up to 1000;
+    /// `discard` lists again after deleting them).
+    fn list(&self, prefix: &str) -> Result<Vec<String>, String> {
+        let mut url = Url::parse(&format!("{}/{}", self.endpoint, self.config.bucket))
+            .map_err(|e| e.to_string())?;
+        let prefix = percent_encoding::utf8_percent_encode(prefix, sigv4::UNRESERVED);
+        url.set_query(Some(&format!("list-type=2&prefix={prefix}")));
+        let body = request(
+            &self.client,
+            &self.signer(),
+            "GET",
+            &url,
+            Vec::new(),
+            Duration::from_secs(30),
+        )?;
+        let body = String::from_utf8_lossy(&body);
+        Ok(body
+            .split("<Key>")
+            .skip(1)
+            .filter_map(|rest| rest.split_once("</Key>"))
+            .map(|(key, _)| {
+                key.replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'")
+                    .replace("&amp;", "&")
+            })
+            .collect())
+    }
+
+    fn delete(&self, key: &str) -> Result<(), String> {
+        match self.send("DELETE", key, Vec::new(), Duration::from_secs(30)) {
+            Err(error) if !error.ends_with("404 Not Found") => Err(error),
+            _ => Ok(()),
+        }
+    }
+
     /// Uploads what the outbox still holds after a stop, then the manifest.
     /// `Ok(true)`: the take is complete in the bucket. `Ok(false)`: the
-    /// deadline passed first; call again. `Err`: the frozen take does not
-    /// match `stop.json` (missing, changed, or a path outside the outbox),
-    /// so the manifest is never written.
+    /// deadline passed first; call again. `Err`: the take was discarded, or
+    /// the frozen take does not match `stop.json` (missing, changed, or a
+    /// path outside the outbox), so the manifest is never written.
     pub fn drain(&mut self, deadline: Option<Instant>) -> Result<bool, String> {
+        if discarded(&self.outbox) {
+            return Err("the take was discarded".into());
+        }
         if self.uploaded.contains_key(MANIFEST) {
             return Ok(true);
         }
@@ -395,9 +816,20 @@ impl Mirror {
         }
         let outbox = fs::canonicalize(&self.outbox).map_err(|e| format!("outbox: {e}"))?;
         let stop_sha = sigv4::sha256_hex(&stop);
+        self.sent.store(0, Ordering::Relaxed);
+        let _beating = self.heartbeat(expected.iter().map(|file| file.size).sum());
         let mut backoff = Duration::from_secs(1);
         loop {
+            if discarded(&self.outbox) {
+                return Err("the take was discarded".into());
+            }
             let mut failed = false;
+            // Counted up front, so a retry pass never reports fewer bytes than the last.
+            let mut done: u64 = expected
+                .iter()
+                .filter(|file| self.uploaded.get(&file.path) == Some(&file.sha256))
+                .map(|file| file.size)
+                .sum();
             let timeout = deadline.map_or(Duration::from_secs(120), remaining);
             if let Err(error) = self.put_hashed(STOP, stop.clone(), stop_sha.clone(), timeout) {
                 tracing::warn!(%error, "Upload failed; retrying");
@@ -407,17 +839,27 @@ impl Mirror {
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     return Ok(false);
                 }
+                if discarded(&self.outbox) {
+                    return Err("the take was discarded".into());
+                }
                 // The bucket already holds exactly this object.
                 if self.uploaded.get(&file.path) == Some(&file.sha256) {
                     continue;
                 }
                 let body = read_frozen(&outbox, file)?;
-                let timeout = deadline.map_or(Duration::from_secs(120), remaining);
-                if let Err(error) = self.put_hashed(&file.path, body, file.sha256.clone(), timeout)
-                {
-                    tracing::warn!(%error, "Upload failed; retrying");
-                    failed = true;
+                // Not cut at the deadline: a file cut part-way restarts from
+                // its first byte. The deadline only stops the next one starting.
+                let timeout = Duration::from_secs((file.size / BYTES_PER_SECOND_FLOOR).max(120));
+                // A failed PUT's streamed bytes do not count.
+                self.sent.store(done, Ordering::Relaxed);
+                match self.put_hashed(&file.path, body, file.sha256.clone(), timeout) {
+                    Ok(_) => done += file.size,
+                    Err(error) => {
+                        tracing::warn!(%error, "Upload failed; retrying");
+                        failed = true;
+                    }
                 }
+                self.sent.store(done, Ordering::Relaxed);
             }
             if !failed {
                 let manifest = json!({
@@ -478,12 +920,8 @@ impl Mirror {
         if failed {
             return;
         }
-        let mut drained = self.drain(Some(Instant::now() + request.drain));
-        let _ = request.drained.send(());
-        if drained == Ok(false) {
-            drained = self.drain(None);
-        }
-        if let Err(error) = drained {
+        // While the presenter decides; send.json goes up on its own (send_to_film).
+        if let Err(error) = self.drain(None) {
             tracing::error!(%error, "Mirror cannot complete this take");
         }
     }
@@ -491,9 +929,7 @@ impl Mirror {
 
 struct StopRequest {
     stopped_at_unix_ms: u64,
-    drain: Duration,
     frozen: mpsc::Sender<Result<(), String>>,
-    drained: mpsc::Sender<()>,
 }
 
 /// The handle to a mirror running on its own thread.
@@ -505,26 +941,20 @@ pub struct Worker {
 impl Worker {
     /// Runs the stop sequence. Blocks, with no time limit, until the freeze
     /// is over: `Err` means this take is not mirrored (`mirror-failed.json`
-    /// says why), and Cap carries on as without a mirror. Then waits for the
-    /// drain for about `drain`; uploads still pending carry on in the background.
-    pub fn stop(self, stopped_at_unix_ms: u64, drain: Duration) -> Result<(), String> {
+    /// says why), and Cap carries on as without a mirror. The drain then runs
+    /// on in the background while the presenter chooses Send or Discard.
+    pub fn stop(self, stopped_at_unix_ms: u64) -> Result<(), String> {
         self.stopping.store(true, Ordering::Relaxed);
         let (frozen, frozen_rx) = mpsc::channel();
-        let (drained, drained_rx) = mpsc::channel();
         self.stop
             .send(StopRequest {
                 stopped_at_unix_ms,
-                drain,
                 frozen,
-                drained,
             })
             .map_err(|_| "mirror thread has exited".to_string())?;
         frozen_rx
             .recv()
-            .map_err(|_| "mirror thread exited before the freeze".to_string())??;
-        // The margin covers one request whose timeout outlives the deadline.
-        let _ = drained_rx.recv_timeout(drain + Duration::from_secs(40));
-        Ok(())
+            .map_err(|_| "mirror thread exited before the freeze".to_string())?
     }
 }
 
@@ -543,7 +973,7 @@ struct StopFile {
 /// A plain relative path inside the take that is none of the mirror's own files.
 fn inside(relative: &str) -> bool {
     let path = Path::new(relative);
-    ![STOP, MANIFEST, LEDGER, FAILED].contains(&relative)
+    ![STOP, MANIFEST, LEDGER, FAILED, PROGRESS, SEND, DISCARDED].contains(&relative)
         && path.components().next().is_some()
         && path
             .components()
@@ -575,21 +1005,7 @@ pub fn request(
     body: Vec<u8>,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
-    let host = match url.port() {
-        Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
-        None => url.host_str().unwrap_or_default().to_string(),
-    };
-    let sha = sigv4::sha256_hex(&body);
-    let mut headers = BTreeMap::from([
-        ("host".to_string(), host),
-        ("x-amz-content-sha256".to_string(), sha.clone()),
-        (
-            "x-amz-date".to_string(),
-            chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
-        ),
-    ]);
-    let (authorization, _) = sigv4::authorize(signer, method, url, &headers, &sha)?;
-    headers.insert("authorization".into(), authorization);
+    let headers = signed(signer, method, url, &body)?;
     let mut request = client
         .request(method.parse().map_err(|_| "bad method")?, url.clone())
         .timeout(timeout)
@@ -606,6 +1022,67 @@ pub fn request(
     Ok(bytes.to_vec())
 }
 
+/// The SigV4 headers for one request.
+fn signed(
+    signer: &sigv4::Key,
+    method: &str,
+    url: &Url,
+    body: &[u8],
+) -> Result<BTreeMap<String, String>, String> {
+    let host = match url.port() {
+        Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
+        None => url.host_str().unwrap_or_default().to_string(),
+    };
+    let sha = sigv4::sha256_hex(body);
+    let mut headers = BTreeMap::from([
+        ("host".to_string(), host),
+        ("x-amz-content-sha256".to_string(), sha.clone()),
+        (
+            "x-amz-date".to_string(),
+            chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
+        ),
+    ]);
+    let (authorization, _) = sigv4::authorize(signer, method, url, &headers, &sha)?;
+    headers.insert("authorization".into(), authorization);
+    Ok(headers)
+}
+
+/// A request body that adds each chunk to `sent`, and notes when, as the
+/// connection takes it: a stalled connection stops taking chunks.
+struct Counted {
+    body: bytes::Bytes,
+    sent: Arc<AtomicU64>,
+    /// `None` once the last chunk is taken: no stall applies after that.
+    moved: Arc<Mutex<Option<Instant>>>,
+}
+
+impl http_body::Body for Counted {
+    type Data = bytes::Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<bytes::Bytes>, Self::Error>>> {
+        if self.body.is_empty() {
+            return Poll::Ready(None);
+        }
+        let take = self.body.len().min(64 * 1024);
+        let chunk = self.body.split_to(take);
+        self.sent.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        *self.moved.lock().unwrap() = (!self.body.is_empty()).then(Instant::now);
+        Poll::Ready(Some(Ok(http_body::Frame::data(chunk))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_empty()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.body.len() as u64)
+    }
+}
+
 fn hash_file(path: &Path) -> io::Result<(u64, String)> {
     let mut hasher = sha2::Sha256::default();
     let size = io::copy(&mut fs::File::open(path)?, &mut hasher)?;
@@ -619,10 +1096,12 @@ fn remaining(deadline: Instant) -> Duration {
 }
 
 /// D21's upload order: sidecars, then audio, then screen, then camera.
+/// The prefix match also ranks the unfragmented `display.mp4` and
+/// `camera.mp4` (macOS with a camera) behind the sidecars.
 fn upload_rank(relative: &str) -> u8 {
-    if relative.contains("/display/") {
+    if relative.contains("/display") {
         2
-    } else if relative.contains("/camera/") {
+    } else if relative.contains("/camera") {
         3
     } else if relative.ends_with(".m4a") {
         1
@@ -634,7 +1113,8 @@ fn upload_rank(relative: &str) -> u8 {
 /// Fragments and init segments: Cap never rewrites them, so a hard link is a
 /// faithful, free copy that survives the remux deleting the original.
 fn is_media(relative: &str) -> bool {
-    upload_rank(relative) >= 2 && !relative.ends_with(".json")
+    (relative.contains("/display/") || relative.contains("/camera/"))
+        && !relative.ends_with(".json")
 }
 
 fn m4a_files(dir: &Path) -> Vec<PathBuf> {
@@ -684,4 +1164,28 @@ fn write_atomic(path: &Path, body: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension("mirror-tmp");
     fs::write(&temporary, body)?;
     fs::rename(&temporary, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_write_leaves_no_partial_config_and_keeps_the_download() {
+        let dir =
+            std::env::temp_dir().join(format!("gcs-mirror-adopt-partial-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let valid = r#"{"bucket":"b","hmac_access_id":"a","hmac_secret":"s"}"#;
+        fs::write(dir.join("mirror.json"), valid).unwrap();
+        let target = dir.join("appdata/mirror.json");
+
+        adopt_with(&target, &dir, |file, bytes| {
+            file.write_all(&bytes[..5])?;
+            Err(io::Error::other("disk full"))
+        });
+
+        assert!(!target.exists(), "a partial config was left in app data");
+        assert_eq!(fs::read_to_string(dir.join("mirror.json")).unwrap(), valid);
+    }
 }

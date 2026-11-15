@@ -103,7 +103,7 @@ impl CursorCropMap {
     /// Raw display UV -> content UV. Positions outside the crop map outside
     /// [0, 1]; consumers clamp at the point of use so movement into a
     /// cropped-away strip still aims the camera at that content edge.
-    fn map(&self, x: f64, y: f64) -> (f64, f64) {
+    pub fn map(&self, x: f64, y: f64) -> (f64, f64) {
         (
             (x - self.offset.x) / self.scale.x,
             (y - self.offset.y) / self.scale.y,

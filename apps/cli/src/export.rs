@@ -603,8 +603,8 @@ impl Export {
 }
 
 /// Remux a recording left as fragments (status `NeedsRemux`) into a progressive `display.mp4` before
-/// export, reusing the shared `RecoveryManager`. A graceful `cap record` stop already remuxes in
-/// `finalize`, so this only fires for recordings interrupted before that (e.g. a killed worker);
+/// export, reusing the shared `RecoveryManager`. A foreground `cap record` stop already remuxes in
+/// `finalize`, so this fires for detached takes and recordings interrupted before that (a killed worker);
 /// without it the exporter fails trying to open a fragment directory as a video. No-op for recordings
 /// that are already progressive.
 async fn ensure_remuxed(project_path: PathBuf) -> Result<(), String> {

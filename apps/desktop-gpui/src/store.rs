@@ -1406,7 +1406,8 @@ pub const TELEPROMPTER: &str = "teleprompter";
 
 /// `TeleprompterStore` (`store.ts:17-35`), with `teleprompterDefaults` as the
 /// defaults: `{ script: "", fontSize: 30, wordsPerMinute: 150, lineHeight: 1.5,
-/// showCueMarkers: true, mirror: false, windowOpacityPercent: 92 }`.
+/// showCueMarkers: true, mirror: false, windowOpacityPercent: 92 }`, except the
+/// fork reads at 130 wpm: 150 ran ahead of the lead on camera.
 ///
 /// Read field by field for the same reason `GeneralSettings` is: a value
 /// written by a newer build that this app cannot parse costs that one field its
@@ -1474,7 +1475,7 @@ impl Default for TeleprompterState {
         Self {
             script: String::new(),
             font_size: 30.,
-            words_per_minute: 150,
+            words_per_minute: 130,
             line_height: 1.5,
             show_cue_markers: true,
             mirror: false,
@@ -2872,7 +2873,7 @@ mod tests {
         assert_eq!(loaded.script, "hello");
         // Everything the section does not carry takes `teleprompterDefaults`.
         assert_eq!(loaded.font_size, 30.);
-        assert_eq!(loaded.words_per_minute, 150);
+        assert_eq!(loaded.words_per_minute, 130);
         assert_eq!(loaded.line_height, 1.5);
         assert!(loaded.show_cue_markers);
         assert!(!loaded.mirror);

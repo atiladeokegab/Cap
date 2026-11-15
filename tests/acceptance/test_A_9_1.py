@@ -213,6 +213,29 @@ def test_a_late_read_never_replaces_a_newer_list_mid_take(driver, xml_server, tm
     assert result["current"]["shot_id"] == "demo"
 
 
+def test_a_reload_before_the_first_mark_keeps_the_list_the_take_started_with(
+    driver, xml_server, tmp_path
+):
+    # The take starts on the list read at its start; Reload is pressed before
+    # its first mark, and the newer list waits for the take to end.
+    reads, bucket = republished(
+        xml_server, listed("intro"), listed("demo"), listed("ask")
+    )
+    take = tmp_path / "take"
+    take.mkdir()
+    result = driver(
+        "shots",
+        **bucket,
+        epoch_ms=0,
+        script=[
+            {"at_ms": 0, "action": "take_start", "take": str(take)},
+            {"at_ms": 100, "action": "reload"},
+        ],
+    )
+    assert len(reads) == 3
+    assert result["current"]["shot_id"] == "demo", result
+
+
 def test_final_reload_settles_before_the_driver_reports(driver, xml_server):
     reads, bucket = republished(xml_server, listed("intro"), listed("demo", "ask"))
 

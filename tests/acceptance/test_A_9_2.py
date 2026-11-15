@@ -65,6 +65,7 @@ def test_no_progress_field_looks_as_today(driver):
 @pytest.mark.parametrize(
     "malformed",
     [
+        None,
         "1 of 3",
         [],
         {"shots": "all", "criteria": []},
@@ -76,6 +77,7 @@ def test_no_progress_field_looks_as_today(driver):
         {"shots": [], "criteria": [{"id": "wow", "name": "Wow", "covered": 1}]},
     ],
     ids=[
+        "null",
         "string",
         "array",
         "shots-not-a-list",
