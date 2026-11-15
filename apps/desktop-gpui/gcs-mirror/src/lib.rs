@@ -50,7 +50,7 @@ const FAILED: &str = "mirror-failed.json";
 /// The presenter's Send (film's send.json contract): `stop.json` says
 /// `send_required`, so the film watcher builds nothing until this lands. A
 /// control file, kept in the outbox and never listed in `stop.json`.
-const SEND: &str = "send.json";
+const SEND_FILE: &str = "send.json";
 pub const CAP_SEND_VERSION: &str = "1";
 /// Local only: the presenter discarded the take, so nothing of it is sent
 /// again and what went up is deleted. Holds `{"cleaned": false}` until a LIST
@@ -103,10 +103,38 @@ pub fn discard_pending(outbox: &Path) -> bool {
         .is_some_and(|body| !body.windows(14).any(|w| w == br#""cleaned":true"#))
 }
 
+/// The after-Stop question and its answers (A-12.1). Closing it decides nothing.
+pub const SEND_TITLE: &str = "Send this take to the film?";
+pub const SEND: &str = "Send";
+pub const KEEP_BACK: &str = "Keep back";
+pub const DISCARD: &str = "Discard";
+
+/// The presenter's choice as `send.json` holds it; `None` before any.
+pub fn decision(outbox: &Path) -> Option<serde_json::Value> {
+    fs::read(outbox.join(SEND_FILE))
+        .ok()
+        .and_then(|body| serde_json::from_slice(&body).ok())
+}
+
+/// Sent to the film: the one choice that can never change again.
+pub fn sent(outbox: &Path) -> bool {
+    decision(outbox).is_some_and(|choice| choice["send"] == true)
+}
+
+/// Kept back: the film builds nothing, and Send is still open from the recordings list.
+pub fn kept_back(outbox: &Path) -> bool {
+    !discarded(outbox) && decision(outbox).is_some_and(|choice| choice["send"] == false)
+}
+
+/// A choice in `send.json` that a restart still uploads (`upload_decision`).
+pub fn decided(outbox: &Path) -> bool {
+    outbox.join(SEND_FILE).is_file() && !discarded(outbox)
+}
+
 /// A take stopped by this fork that is neither sent nor discarded. Takes from
 /// a fork before the choice (no `send_required`) are never asked about.
 pub fn undecided(outbox: &Path) -> bool {
-    !outbox.join(SEND).is_file()
+    !outbox.join(SEND_FILE).is_file()
         && !discarded(outbox)
         && fs::read(outbox.join(STOP))
             .ok()
@@ -688,35 +716,51 @@ impl Mirror {
         }
     }
 
-    /// The presenter's Send: PUTs `send.json`, which lets the film watcher
-    /// build the take once its manifest lands. A retry re-sends the first
-    /// decision unchanged; a discarded take is never sent.
-    pub fn send_to_film(&mut self) -> Result<(), String> {
+    /// Writes the presenter's choice to `send.json`, a control file never in
+    /// the manifest or `stop.json`. Only `send` false -> true changes it: a
+    /// repeated or retried choice keeps the first `decided_at`, and Keep back
+    /// after Send stays sent. Returns the choice as it now stands.
+    pub fn decide(&mut self, send: bool) -> Result<serde_json::Value, String> {
         if discarded(&self.outbox) {
             return Err("the take was discarded".into());
         }
-        let path = self.outbox.join(SEND);
-        let body = match fs::read(&path) {
-            Ok(body) => body,
-            Err(_) => {
-                let choice = json!({
-                    "send": true,
-                    "decided_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                    "cap_send_version": CAP_SEND_VERSION,
-                });
-                let body = serde_json::to_vec_pretty(&choice).expect("JSON value serializes");
-                write_atomic(&path, &body).map_err(|e| format!("write {SEND}: {e}"))?;
-                body
-            }
-        };
-        self.put(SEND, body, Duration::from_secs(30)).map(|_| ())
+        if let Some(choice) = decision(&self.outbox)
+            && (choice["send"] == true || !send)
+        {
+            return Ok(choice);
+        }
+        let choice = json!({
+            "send": send,
+            "decided_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "cap_send_version": CAP_SEND_VERSION,
+        });
+        let body = serde_json::to_vec_pretty(&choice).expect("JSON value serializes");
+        write_atomic(&self.outbox.join(SEND_FILE), &body)
+            .map_err(|e| format!("write {SEND_FILE}: {e}"))?;
+        Ok(choice)
+    }
+
+    /// PUTs `send.json` as it stands beside the take's manifest; the ledger
+    /// makes a repeat of the same choice a no-op, so a restart can always call it.
+    pub fn upload_decision(&mut self) -> Result<(), String> {
+        let body =
+            fs::read(self.outbox.join(SEND_FILE)).map_err(|e| format!("read {SEND_FILE}: {e}"))?;
+        self.put(SEND_FILE, body, Duration::from_secs(30))
+            .map(|_| ())
+    }
+
+    /// The presenter's Send: lets the film watcher build the take once its
+    /// manifest lands. A discarded take is never sent.
+    pub fn send_to_film(&mut self) -> Result<(), String> {
+        self.decide(true)?;
+        self.upload_decision()
     }
 
     /// The presenter's Discard: marks the take so nothing more of it goes up,
     /// then deletes every object in its bucket folder. `Err` leaves it
     /// pending (`discard_pending`); call again until `Ok`. A sent take stays sent.
     pub fn discard(&mut self) -> Result<(), String> {
-        if self.outbox.join(SEND).is_file() {
+        if sent(&self.outbox) {
             return Err("the take is already sent to film".into());
         }
         if !discard_pending(&self.outbox) && discarded(&self.outbox) {
@@ -973,7 +1017,10 @@ struct StopFile {
 /// A plain relative path inside the take that is none of the mirror's own files.
 fn inside(relative: &str) -> bool {
     let path = Path::new(relative);
-    ![STOP, MANIFEST, LEDGER, FAILED, PROGRESS, SEND, DISCARDED].contains(&relative)
+    ![
+        STOP, MANIFEST, LEDGER, FAILED, PROGRESS, SEND_FILE, DISCARDED,
+    ]
+    .contains(&relative)
         && path.components().next().is_some()
         && path
             .components()

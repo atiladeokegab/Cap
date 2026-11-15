@@ -4851,6 +4851,17 @@ impl MainWindow {
                 }),
             ));
         }
+        // A take kept back after Stop (A-12.1): Send it to the film later.
+        if cap_gcs_mirror::kept_back(&path.join("outbox")) {
+            let take = path.clone();
+            row = row.child(self.library_action(
+                ("lib-rec-send", index),
+                "icons/film.svg",
+                move |_, _, _| {
+                    crate::gcs_mirror::decide(take.clone(), crate::gcs_mirror::Choice::Send)
+                },
+            ));
+        }
         if let Some(url) = sharing {
             row = row.child(self.library_action(
                 ("lib-rec-link", index),

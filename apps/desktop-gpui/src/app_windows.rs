@@ -1741,10 +1741,9 @@ pub fn open_teleprompter(cx: &mut App) {
     // `commands.refreshWindowContentProtection()` on open
     // (`src/utils/teleprompter.ts:26,38,64`): a window that appears *after* the
     // capture started missed `begin_recording`'s pass, and its id can no longer
-    // join the content filter -- the sharing type is the only lever left.
-    if RecordingSession::global(cx).read(cx).phase != Phase::Idle {
-        set_teleprompter_content_protection(true, cx);
-    }
+    // join the content filter -- the sharing type is the only lever left. The
+    // fork protects it from the start, recording or not (A-12.3).
+    set_teleprompter_content_protection(true, cx);
 
     let opened = handle
         .update(cx, |view, window, cx| {

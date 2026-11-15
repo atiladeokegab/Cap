@@ -1,5 +1,6 @@
 //! Test-only adapter for tests/acceptance: one JSON request on stdin
-//! (`op`: sign, scan, stop, resume, shots, prompter, zoom or windows), one JSON
+//! (`op`: sign, scan, stop, resume, send_dialog, resume_pending, shots,
+//! prompter, zoom or windows), one JSON
 //! object on stdout.
 
 // The teleprompter's shot logic, std and serde only, straight from the app.
@@ -74,6 +75,14 @@ fn windows(request: &Value) -> Result<Value, String> {
 }
 
 fn mirror(request: &Value) -> Result<Option<Mirror>, String> {
+    mirror_at(
+        request,
+        Path::new(text(request, "take")),
+        Path::new(text(request, "outbox")),
+    )
+}
+
+fn mirror_at(request: &Value, take: &Path, outbox: &Path) -> Result<Option<Mirror>, String> {
     let Some(config) = request["config"]
         .as_str()
         .and_then(|path| Config::load(Path::new(path)))
@@ -81,13 +90,7 @@ fn mirror(request: &Value) -> Result<Option<Mirror>, String> {
         return Ok(None);
     };
     let prefix = config.prefix.clone().unwrap_or_else(|| "takes".into());
-    let mut mirror = Mirror::new(
-        config,
-        Path::new(text(request, "take")),
-        Path::new(text(request, "outbox")),
-        &prefix,
-    )
-    .map_err(|e| e.to_string())?;
+    let mut mirror = Mirror::new(config, take, outbox, &prefix).map_err(|e| e.to_string())?;
     if let Some(endpoint) = request["endpoint"].as_str() {
         mirror.set_endpoint(endpoint);
     }
@@ -308,8 +311,17 @@ fn prompter_op(request: &Value) -> Result<Value, String> {
     let at = |ms: f64| base + Duration::from_secs_f64(ms.max(0.) / 1000.);
     let armed = at(request["epoch_ms"].as_f64().unwrap_or(0.));
     let take = request["take"].as_str().map(PathBuf::from);
+    if let Some(take) = &take {
+        shots.follow(Some(take));
+    }
+    let app_data = request["app_data"].as_str().map(PathBuf::from);
+    let mut opacity = app_data
+        .as_deref()
+        .map_or(shots::RUNNING_OPACITY_DEFAULT, running_opacity);
+    let mut mouse_over = false;
     let mut clock = shots::ShotClock::default();
     let (mut line, mut recording, mut go_at) = (0, true, None::<f64>);
+    let mut phase = shots.phase();
     let mut views = Vec::new();
     for step in &script {
         let ms = step["at_ms"].as_f64().unwrap_or(0.);
@@ -320,14 +332,23 @@ fn prompter_op(request: &Value) -> Result<Value, String> {
                     "next" => shots::Action::Next,
                     _ => shots::Action::Retake,
                 };
-                if shots.cue == shots::Cue::Ready(action) {
-                    shots.go();
-                    go_at = Some(ms);
-                } else if shots.hold(action) {
-                    clock.pause();
-                    recording = false;
+                let counting = matches!(shots.cue, shots::Cue::Countdown(_));
+                if shots.hold(action) {
+                    // Inert during the 3-2-1; on a card it only switches cards.
+                    if !counting {
+                        clock.pause();
+                        recording = false;
+                    }
                 } else {
                     press = Some(action);
+                }
+            }
+            Some("mouse") => mouse_over = step["over"].as_bool().unwrap_or(false),
+            Some("opacity") => {
+                opacity = (step["percent"].as_u64().unwrap_or(0) as u32)
+                    .clamp(shots::RUNNING_OPACITY_MIN, shots::RUNNING_OPACITY_MAX);
+                if let Some(dir) = &app_data {
+                    save_running_opacity(dir, opacity)?;
                 }
             }
             Some("go") => {
@@ -347,7 +368,10 @@ fn prompter_op(request: &Value) -> Result<Value, String> {
         let count = go_at.and_then(|go| shots::countdown((ms - go) as u64));
         if go_at.is_some() && count.is_none() {
             go_at = None;
-            clock.resume(Some(at(ms)));
+            // Go on a fresh take counts in a recording that never paused.
+            if !recording {
+                clock.resume(Some(at(ms)));
+            }
             recording = true;
             if let shots::Cue::Countdown(action) = shots.cue {
                 press = Some(action);
@@ -359,14 +383,24 @@ fn prompter_op(request: &Value) -> Result<Value, String> {
             shots.mark(action, take, time).map_err(|e| e.to_string())?;
             line = 0;
         }
-        let card = shots.upcoming().map(|shot| {
+        let card = shots.upcoming().filter(|_| !shots.done).map(|shot| {
             json!({
                 "title": shot.title,
+                "heading": shots.heading(shot),
+                "performer_label": shot.performer_label,
                 "on_screen": shot.on_screen,
                 "text_px": SCRIPT_TEXT_PX * shots::CARD_SCALE,
+                "full_window": true,
                 "go": count.is_none(),
             })
         });
+        let was = std::mem::replace(&mut phase, shots.phase());
+        let look = shots::window_look(phase, opacity, mouse_over);
+        let (state, color) = if recording {
+            (shots::RECORDING_STATE, shots::RECORDING_COLOR)
+        } else {
+            (shots::PAUSED_STATE, shots::PAUSED_COLOR)
+        };
         views.push(json!({
             "shot_id": shots.current().shot_id,
             "line": line,
@@ -374,9 +408,51 @@ fn prompter_op(request: &Value) -> Result<Value, String> {
             "recording": recording,
             "card": card,
             "countdown": count,
+            "phase": phase.as_str(),
+            "chime": was == shots::Phase::Running && phase == shots::Phase::Reading,
+            "state": state,
+            "state_color": format!("#{color:06x}"),
+            "countdown_label": shots.countdown_label(),
+            "message": shots.done.then_some(shots::DONE_MESSAGE),
+            "window": {
+                "background_alpha": look.background_alpha,
+                "text_alpha": look.text_alpha,
+                "click_through": look.click_through,
+                "capture_excluded": look.capture_excluded,
+            },
         }));
     }
     Ok(json!({ "mode": "shots", "marks": shots.marks(), "views": views }))
+}
+
+/// The app store's (`app_data/store`) teleprompter Running opacity, as
+/// `TeleprompterState::running_opacity_percent` reads it.
+fn running_opacity(app_data: &Path) -> u32 {
+    std::fs::read(app_data.join("store"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|store| store["teleprompter"]["runningOpacityPercent"].as_u64())
+        .map_or(shots::RUNNING_OPACITY_DEFAULT, |p| {
+            (p as u32).clamp(shots::RUNNING_OPACITY_MIN, shots::RUNNING_OPACITY_MAX)
+        })
+}
+
+fn save_running_opacity(app_data: &Path, percent: u32) -> Result<(), String> {
+    let path = app_data.join("store");
+    let mut store: Value = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| json!({}));
+    if !store["teleprompter"].is_object() {
+        store["teleprompter"] = json!({});
+    }
+    store["teleprompter"]["runningOpacityPercent"] = json!(percent);
+    std::fs::create_dir_all(app_data).map_err(|e| e.to_string())?;
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&store).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// The editor's zoom pass over one recording, in ms: cursor.json's `moves`
@@ -512,6 +588,50 @@ fn run(request: &Value) -> Result<Value, String> {
                 Ok(drained) => json!({ "enabled": true, "drained": drained }),
                 Err(error) => json!({ "enabled": true, "drained": false, "error": error }),
             })
+        }
+        // The after-Stop question (A-12.1) on `take`, answered with `choice`:
+        // send, keep_back or close. The choice is kept even if its upload fails.
+        "send_dialog" => {
+            let shots: Vec<Value> = shots::shot_lengths(Path::new(text(request, "take")))
+                .into_iter()
+                .map(|(shot_id, length_s)| json!({ "shot_id": shot_id, "length_s": length_s }))
+                .collect();
+            let dialog = json!({
+                "title": cap_gcs_mirror::SEND_TITLE,
+                "buttons": [cap_gcs_mirror::SEND, cap_gcs_mirror::KEEP_BACK, cap_gcs_mirror::DISCARD],
+                "shots": shots,
+                "opened_from": request["opened_from"],
+            });
+            let send = match text(request, "choice") {
+                "close" => return Ok(json!({ "dialog": dialog, "send": null })),
+                "send" => mirror.decide(true)?,
+                "keep_back" => mirror.decide(false)?,
+                choice => return Err(format!("unknown choice {choice:?}")),
+            };
+            let upload_error = mirror.upload_decision().err();
+            Ok(json!({ "dialog": dialog, "send": send, "upload_error": upload_error }))
+        }
+        // A new Cap process: gcs_mirror::resume_pending's decision pass over `recordings`.
+        "resume_pending" => {
+            let mut resumed = Vec::new();
+            let mut takes: Vec<PathBuf> = std::fs::read_dir(text(request, "recordings"))
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .map(|entry| entry.path())
+                .collect();
+            takes.sort();
+            for take in takes {
+                let outbox = take.join("outbox");
+                if !cap_gcs_mirror::decided(&outbox) {
+                    continue;
+                }
+                let Some(mut mirror) = mirror_at(request, &take, &outbox)? else {
+                    continue;
+                };
+                let error = mirror.upload_decision().err();
+                resumed.push(json!({ "take": take, "error": error }));
+            }
+            Ok(json!({ "enabled": true, "resumed": resumed }))
         }
         op => Err(format!("unknown op {op:?}")),
     }
