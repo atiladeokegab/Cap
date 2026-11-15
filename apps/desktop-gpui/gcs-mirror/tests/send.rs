@@ -76,6 +76,11 @@ struct Store {
     /// A LIST takes its names on arrival but answers only once released.
     hold_lists: bool,
     lists_waiting: usize,
+    /// Holds only the next PUT, until `release_held`.
+    hold_next_put: bool,
+    release_held: bool,
+    /// Every PUT body, in the order they landed.
+    bodies: Vec<(String, Vec<u8>)>,
 }
 
 fn store() -> (String, Arc<Mutex<Store>>) {
@@ -106,15 +111,17 @@ fn store() -> (String, Arc<Mutex<Store>>) {
                         length = value.trim().parse().unwrap();
                     }
                 }
-                reader.read_exact(&mut vec![0; length]).unwrap();
+                let mut payload = vec![0; length];
+                reader.read_exact(&mut payload).unwrap();
                 let (path, query) = target.split_once('?').unwrap_or((&target, ""));
                 let key = percent_decode_str(path.trim_start_matches("/b/"))
                     .decode_utf8_lossy()
                     .into_owned();
                 let mut state = shared.lock().unwrap();
-                if method == "PUT" && state.hold_puts {
+                let once = method == "PUT" && std::mem::take(&mut state.hold_next_put);
+                if (method == "PUT" && state.hold_puts) || once {
                     state.puts_waiting += 1;
-                    while state.hold_puts {
+                    while state.hold_puts || (once && !state.release_held) {
                         drop(state);
                         std::thread::sleep(Duration::from_millis(10));
                         state = shared.lock().unwrap();
@@ -142,6 +149,7 @@ fn store() -> (String, Arc<Mutex<Store>>) {
                         format!("<ListBucketResult>{keys}</ListBucketResult>"),
                     )
                 } else if method == "PUT" {
+                    state.bodies.push((key.clone(), payload));
                     state.objects.insert(key);
                     if std::mem::take(&mut state.lose_next_put) {
                         return; // stored, but the connection drops before any response
@@ -357,4 +365,67 @@ fn a_take_from_before_the_choice_is_never_asked_about() {
     )
     .unwrap();
     assert!(!undecided(&dir.join("outbox")));
+}
+
+fn sent_bodies(state: &Mutex<Store>) -> Vec<serde_json::Value> {
+    let state = state.lock().unwrap();
+    state
+        .bodies
+        .iter()
+        .filter(|(key, _)| key == "takes/t/send.json")
+        .map(|(_, body)| serde_json::from_slice(body).unwrap())
+        .collect()
+}
+
+#[test]
+fn a_held_keep_back_never_lands_after_a_later_send() {
+    let (endpoint, state) = store();
+    let dir = folder("send-held-keep-back");
+    state.lock().unwrap().hold_next_put = true;
+    let mut keeping = mirror(&dir, &endpoint);
+    let keep = std::thread::spawn(move || {
+        keeping.decide(false).unwrap();
+        keeping.upload_decision()
+    });
+    while state.lock().unwrap().puts_waiting == 0 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut sending = mirror(&dir, &endpoint);
+    let send = std::thread::spawn(move || sending.send_to_film());
+    // Unserialized, the Send's PUT lands here and the held false lands after it.
+    std::thread::sleep(Duration::from_millis(300));
+    state.lock().unwrap().release_held = true;
+    keep.join().unwrap().unwrap();
+    send.join().unwrap().unwrap();
+    let bodies = sent_bodies(&state);
+    assert_eq!(
+        bodies.last().unwrap()["send"],
+        true,
+        "the bucket says {bodies:?}"
+    );
+}
+
+#[test]
+fn simultaneous_sends_keep_one_decided_at_everywhere() {
+    let (endpoint, state) = store();
+    let dir = folder("send-duplicate");
+    let start = Arc::new(std::sync::Barrier::new(4));
+    let sends: Vec<_> = (0..4)
+        .map(|_| {
+            let mut sending = mirror(&dir, &endpoint);
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                sending.send_to_film()
+            })
+        })
+        .collect();
+    for send in sends {
+        send.join().unwrap().unwrap();
+    }
+    let local: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("outbox/send.json")).unwrap()).unwrap();
+    let bodies = sent_bodies(&state);
+    assert!(!bodies.is_empty());
+    assert!(bodies.iter().all(|b| *b == local), "{local} vs {bodies:?}");
 }

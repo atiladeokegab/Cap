@@ -67,6 +67,21 @@ pub fn discarded(outbox: &Path) -> bool {
 // shortcut: per process; a second process mirroring the same take is not seen.
 static IN_FLIGHT: LazyLock<Mutex<HashMap<PathBuf, (usize, u64)>>> = LazyLock::new(Default::default);
 
+/// One lock per outbox: a choice is written, and `send.json` read and PUT,
+/// under it, so a held older PUT can never land after a newer choice.
+// shortcut: per process, like IN_FLIGHT; a second process deciding the same take is not serialized.
+static DECIDING: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+    LazyLock::new(Default::default);
+
+fn deciding(outbox: &Path) -> Arc<Mutex<()>> {
+    DECIDING
+        .lock()
+        .unwrap()
+        .entry(outbox.to_path_buf())
+        .or_default()
+        .clone()
+}
+
 struct InFlight(PathBuf);
 
 impl InFlight {
@@ -721,6 +736,8 @@ impl Mirror {
     /// repeated or retried choice keeps the first `decided_at`, and Keep back
     /// after Send stays sent. Returns the choice as it now stands.
     pub fn decide(&mut self, send: bool) -> Result<serde_json::Value, String> {
+        let lock = deciding(&self.outbox);
+        let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         if discarded(&self.outbox) {
             return Err("the take was discarded".into());
         }
@@ -743,6 +760,8 @@ impl Mirror {
     /// PUTs `send.json` as it stands beside the take's manifest; the ledger
     /// makes a repeat of the same choice a no-op, so a restart can always call it.
     pub fn upload_decision(&mut self) -> Result<(), String> {
+        let lock = deciding(&self.outbox);
+        let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         let body =
             fs::read(self.outbox.join(SEND_FILE)).map_err(|e| format!("read {SEND_FILE}: {e}"))?;
         self.put(SEND_FILE, body, Duration::from_secs(30))

@@ -951,7 +951,7 @@ impl Render for TeleprompterWindow {
         self.sync_phase(window, cx);
         let theme = self.theme;
         let mut shell = theme.teleprompter_shell_bg();
-        shell.a *= self.look().background_alpha as f32;
+        shell.a = shots::shell_alpha(shell.a, self.look().background_alpha);
 
         div()
             .track_focus(&self.focus)

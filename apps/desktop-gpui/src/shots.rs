@@ -366,6 +366,17 @@ pub fn window_look(phase: Phase, opacity_percent: u32, mouse_over: bool) -> Wind
     }
 }
 
+/// The shell's alpha as drawn: the look's alpha itself, not scaled by the
+/// theme's own tint (0.9 off mac), so Running at 40% is 0.4. A transparent
+/// glass shell stays transparent.
+pub fn shell_alpha(theme_alpha: f32, look_alpha: f64) -> f32 {
+    if theme_alpha == 0. {
+        0.
+    } else {
+        look_alpha as f32
+    }
+}
+
 /// Go's 3-2-1, one count a second.
 pub const COUNTDOWN_MS: u64 = 3000;
 
@@ -912,6 +923,11 @@ mod tests {
         assert_eq!(alpha(Phase::Reading, 40, true), 1.0);
         assert!(window_look(Phase::Running, 40, false).click_through);
         assert!(!window_look(Phase::Countdown, 40, false).click_through);
+        // Drawn on the non-mac 0.9 shell, the alpha is the requested one.
+        assert_eq!(shell_alpha(0.9, alpha(Phase::Running, 40, false)), 0.4);
+        assert_eq!(shell_alpha(0.9, alpha(Phase::Running, 40, true)), 0.15);
+        assert_eq!(shell_alpha(0.9, alpha(Phase::Reading, 40, false)), 1.0);
+        assert_eq!(shell_alpha(0., 0.4), 0.);
     }
 
     #[test]
