@@ -2,22 +2,12 @@
 //! they take to read. A shot that fits the view never moves; a longer one
 //! scrolls only by what overflows. No gpui here, so the rule tests on its own.
 
-/// Seconds to read `words` at `words_per_minute`, floored at 1s the way
-/// `calculatePlaybackSpeed` is, so an empty shot still reaches its STOP cue.
-pub fn reading_seconds(words: usize, words_per_minute: u32) -> f32 {
-    (words.max(1) as f32 / words_per_minute.max(1) as f32 * 60.).max(1.)
-}
-
 /// How far through its reading time a shot is after `elapsed` more seconds,
-/// 0 to 1. Kept as a fraction, not seconds, so a pace change mid-shot changes
-/// the speed from there on instead of jumping the text.
-pub fn advance_progress(
-    progress: f32,
-    elapsed_seconds: f32,
-    words: usize,
-    words_per_minute: u32,
-) -> f32 {
-    (progress.max(0.) + elapsed_seconds.max(0.) / reading_seconds(words, words_per_minute)).min(1.)
+/// 0 to 1, for a shot that takes `reading_seconds` (`Shot::reading_seconds`,
+/// from its budget). Kept as a fraction, not seconds, so a pace change
+/// mid-shot changes the speed from there on instead of jumping the text.
+pub fn advance_progress(progress: f32, elapsed_seconds: f32, reading_seconds: f32) -> f32 {
+    (progress.max(0.) + elapsed_seconds.max(0.) / reading_seconds.max(f32::EPSILON)).min(1.)
 }
 
 /// Scroll offset in pixels from the top: the overflow, spread evenly across
@@ -43,11 +33,16 @@ pub fn progress_at_offset(offset: f32, text_height: f32, view_height: f32, progr
 mod tests {
     use super::*;
 
+    /// Seconds to read `words` at `words_per_minute`, floored at 1s.
+    fn reading_seconds(words: usize, words_per_minute: u32) -> f32 {
+        (words.max(1) as f32 / words_per_minute.max(1) as f32 * 60.).max(1.)
+    }
+
     /// Runs a shot for `seconds` in 16ms ticks, the window's playback tick.
     fn run(seconds: f32, words: usize, words_per_minute: u32) -> f32 {
         let mut progress = 0.;
         for _ in 0..(seconds / 0.016).round() as usize {
-            progress = advance_progress(progress, 0.016, words, words_per_minute);
+            progress = advance_progress(progress, 0.016, reading_seconds(words, words_per_minute));
         }
         progress
     }
@@ -80,7 +75,11 @@ mod tests {
     fn a_pace_change_mid_shot_keeps_the_text_where_it_is() {
         let progress = run(6., 26, 130);
         let before = scroll_offset(progress, 600., 200.);
-        let after = scroll_offset(advance_progress(progress, 0., 26, 65), 600., 200.);
+        let after = scroll_offset(
+            advance_progress(progress, 0., reading_seconds(26, 65)),
+            600.,
+            200.,
+        );
         assert_eq!(before, after);
     }
 
@@ -88,7 +87,11 @@ mod tests {
     fn a_hand_scroll_while_paused_is_where_playback_resumes() {
         // 1000px of overflow, a quarter read, scrolled by hand to 700px.
         let progress = progress_at_offset(700., 1200., 200., 0.25);
-        let next = scroll_offset(advance_progress(progress, 0.016, 26, 130), 1200., 200.);
+        let next = scroll_offset(
+            advance_progress(progress, 0.016, reading_seconds(26, 130)),
+            1200.,
+            200.,
+        );
         assert!((next - 700.).abs() < 2., "resumed at {next}");
         // A shot that fits keeps its reading time.
         assert_eq!(progress_at_offset(0., 150., 210., 0.25), 0.25);
@@ -97,6 +100,6 @@ mod tests {
     #[test]
     fn an_empty_shot_still_ends() {
         assert_eq!(reading_seconds(0, 130), 1.);
-        assert_eq!(advance_progress(0., 1., 0, 130), 1.);
+        assert_eq!(advance_progress(0., 1., reading_seconds(0, 130)), 1.);
     }
 }
