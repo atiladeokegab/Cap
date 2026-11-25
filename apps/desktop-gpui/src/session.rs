@@ -635,6 +635,13 @@ impl RecordingSession {
         }
     }
 
+    /// The teleprompter closed: its Go is gone, so the take is free from
+    /// here, released now if recording, else as it activates.
+    pub fn prompter_closed(&mut self, cx: &mut Context<Self>) {
+        self.shot_planned = false;
+        self.release_start(cx);
+    }
+
     /// This take follows a shot list: Reading pauses it between shots.
     pub fn shot_planned(&self) -> bool {
         self.shot_planned
@@ -1052,6 +1059,12 @@ impl RecordingSession {
         self.paused_since = None;
         self.shot_clock = Default::default();
         self.start_cue = None;
+        // Its teleprompter closed while starting: a free take, recording now.
+        if !self.shot_planned
+            && let Some(gate) = self.start_gate.as_ref().filter(|gate| gate.is_held())
+        {
+            gate.arm();
+        }
         if self.mode() == Some(recording::RecordingMode::Studio) {
             crate::app_windows::prewarm_shared_wgpu_device(cx);
         }
@@ -1198,14 +1211,16 @@ impl RecordingSession {
         // Stopped before the first Go: nothing was captured, so the take is
         // discarded rather than opened. Only if delete refuses (a pause
         // toggle in flight) does the gate open, so the pipeline can finish.
+        // Starting or Stopping leave a held gate closed: the primed take is
+        // discarded unarmed.
         if self.start_held() && matches!(self.phase, Phase::Recording { .. }) {
             self.delete(cx);
             if !matches!(self.phase, Phase::Recording { .. }) {
                 return;
             }
-        }
-        if let Some(gate) = self.start_gate.as_ref().filter(|gate| gate.is_held()) {
-            gate.arm();
+            if let Some(gate) = &self.start_gate {
+                gate.arm();
+            }
         }
         #[cfg(target_os = "linux")]
         if matches!(self.phase, Phase::Starting | Phase::Stopping)

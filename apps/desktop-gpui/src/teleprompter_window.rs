@@ -278,7 +278,7 @@ impl TeleprompterWindow {
                 crate::app_windows::teleprompter_closed(cx);
                 crate::hotkeys::set_shot_keys(false, cx);
                 // Its Go is gone: a held take records from here, free.
-                RecordingSession::global(cx).update(cx, |session, cx| session.release_start(cx));
+                RecordingSession::global(cx).update(cx, |session, cx| session.prompter_closed(cx));
             });
             true
         });
@@ -546,9 +546,11 @@ impl TeleprompterWindow {
         }
         // The 3-2-1 starts only from a held start or a confirmed pause, so
         // what follows it opens the shot's own segment.
+        // A free take (no list at its Start) never enters the planned flow.
         let session = RecordingSession::global(cx).read(cx);
-        if !session.start_held()
-            && (!session.is_paused() || session.pause_pending() || session.pause_uncertain())
+        if !session.shot_planned()
+            || !session.start_held()
+                && (!session.is_paused() || session.pause_pending() || session.pause_uncertain())
         {
             return;
         }
