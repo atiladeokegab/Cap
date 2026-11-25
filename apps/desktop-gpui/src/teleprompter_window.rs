@@ -324,10 +324,13 @@ impl TeleprompterWindow {
             } else if !was_running {
                 this.start_playback(window, cx);
             }
+            // A resume from the recording bar or hotkey mid-3-2-1 ends the
+            // countdown early: the shot starts there, never stranded.
             if let Some(Cue::Countdown(action)) = this.shots.as_ref().map(|shots| shots.cue)
-                && this.countdown.is_none()
                 && resumed
             {
+                this.countdown = None;
+                this.countdown_task = None;
                 this.write_mark(action, true, window, cx);
             }
             // A take starts: the film may have republished the list (pick-ups).
@@ -457,6 +460,13 @@ impl TeleprompterWindow {
     }
 
     /// The text from its first line, its reading time from the start.
+    /// The Reading card on screen, by shot and cue; `None` outside Reading.
+    fn shown_card(&self) -> Option<(String, Cue)> {
+        let shots = self.shots.as_ref()?;
+        (shots.phase() == shots::Phase::Reading)
+            .then(|| (shots.current().shot_id.clone(), shots.cue))
+    }
+
     fn to_top(&mut self) {
         self.position = 0.;
         self.shot_progress = 0.;
@@ -604,6 +614,7 @@ impl TeleprompterWindow {
                     tracing::warn!(%note, "shot list");
                 }
                 let first = this.shots.is_none();
+                let shown = this.shown_card();
                 let shots = match this.shots.as_mut() {
                     Some(shots) => {
                         shots.replace(list, during_take);
@@ -614,12 +625,9 @@ impl TeleprompterWindow {
                 // Opened mid-take: show the shot the saved marks left on screen.
                 shots.follow(RecordingSession::global(cx).read(cx).shot_take().as_deref());
                 this.shots_error = warning.or(note);
-                // A new Reading card starts at its top.
-                if this
-                    .shots
-                    .as_ref()
-                    .is_some_and(|shots| shots.phase() == shots::Phase::Reading)
-                {
+                // A changed Reading card starts at its top; a queued list
+                // leaves the card, and where it was read to, alone.
+                if this.shown_card() != shown {
                     this.to_top();
                 }
                 this.hold_reading(cx);
