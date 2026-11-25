@@ -41,6 +41,13 @@ FIXTURES = {
         [0.0],
         [0.8],
     ),
+    # The repeat flag alone rejects a key-down: this one follows a key-up and
+    # lands 1 s after the last mark, so only the flag tells it apart.
+    "repeat_flag_after_a_key_up": (
+        [down(0.0), up(0.1), down(1.0, repeat=True), up(1.1)],
+        [0.0],
+        [1.0],
+    ),
 }
 
 
