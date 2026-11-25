@@ -277,6 +277,8 @@ impl TeleprompterWindow {
             cx.defer(|cx| {
                 crate::app_windows::teleprompter_closed(cx);
                 crate::hotkeys::set_shot_keys(false, cx);
+                // Its Go is gone: a held take records from here, free.
+                RecordingSession::global(cx).update(cx, |session, cx| session.release_start(cx));
             });
             true
         });
@@ -482,7 +484,11 @@ impl TeleprompterWindow {
         let session = RecordingSession::global(cx).read(cx);
         // A held start captures nothing yet: no pause, which would end
         // segment 0 empty.
-        if reading && session.shot_take().is_some() && !session.start_held() {
+        if reading
+            && session.shot_planned()
+            && session.shot_take().is_some()
+            && !session.start_held()
+        {
             set_recording_paused(true, cx);
         }
     }

@@ -467,6 +467,9 @@ pub struct RecordingSession {
     countdown_remaining: Option<u32>,
     countdown_cue_abort: Option<futures_util::future::AbortHandle>,
     start_gate: Option<cap_recording::RecordingStartGate>,
+    /// Settled at Start, before priming: this take follows a shot list
+    /// (held for its first Go). A list landing later leaves the take free.
+    shot_planned: bool,
     /// The teleprompter's shot marks read this, never `elapsed()`.
     shot_clock: crate::shots::ShotClock,
     start_cue: Option<crate::app_sounds::StartCue>,
@@ -523,6 +526,7 @@ impl RecordingSession {
             countdown_remaining: None,
             countdown_cue_abort: None,
             start_gate: None,
+            shot_planned: false,
             shot_clock: Default::default(),
             start_cue: None,
             primed: None,
@@ -567,6 +571,10 @@ impl RecordingSession {
         let Some(started_at) = self.started_at else {
             return Duration::ZERO;
         };
+        // Nothing is captured before a planned take's first Go.
+        if self.start_held() {
+            return Duration::ZERO;
+        }
         let paused = self.paused_accum
             + self
                 .paused_since
@@ -587,6 +595,10 @@ impl RecordingSession {
     /// Where a shot mark goes and when it lands: the take's dir and
     /// `(segment, time_ms)` on the start-gate clock `cursor.json` uses.
     pub fn shot_time(&self) -> Option<(std::path::PathBuf, (u32, u64))> {
+        // Marks land only while recording: never while stopping or discarding.
+        if !matches!(self.phase, Phase::Recording { .. }) {
+            return None;
+        }
         let take = self.shot_take()?;
         let armed = self
             .start_gate
@@ -607,11 +619,25 @@ impl RecordingSession {
 
     /// The first Go's countdown is over: capture starts here, segment 0's
     /// zero.
+    /// Also when the teleprompter closes on a held take: it records from
+    /// there as a free take. Only while recording; stop never arms it.
     pub fn release_start(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.phase, Phase::Recording { paused: false }) {
+            return;
+        }
         if let Some(gate) = self.start_gate.as_ref().filter(|gate| gate.is_held()) {
             gate.arm();
+            // The bar's clock counts from the first captured frame.
+            self.started_at = Some(Instant::now());
+            self.paused_accum = Duration::ZERO;
+            self.paused_since = None;
             cx.notify();
         }
+    }
+
+    /// This take follows a shot list: Reading pauses it between shots.
+    pub fn shot_planned(&self) -> bool {
+        self.shot_planned
     }
 
     pub fn is_paused(&self) -> bool {
@@ -738,7 +764,9 @@ impl RecordingSession {
         let start_gate = cap_recording::RecordingStartGate::new();
         // A planned Studio take (the teleprompter has a shot list) captures
         // nothing until the first Go; held before any pipeline sees the gate.
-        if config.mode == recording::RecordingMode::Studio && crate::hotkeys::shot_keys_on(cx) {
+        self.shot_planned =
+            config.mode == recording::RecordingMode::Studio && crate::hotkeys::shot_keys_on(cx);
+        if self.shot_planned {
             start_gate.hold();
         }
         let config = StartConfig {
@@ -1167,8 +1195,15 @@ impl RecordingSession {
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
-        // Stopped before the first Go: open the gate as the cancel paths do,
-        // so the pipeline finishes instead of waiting on a held gate.
+        // Stopped before the first Go: nothing was captured, so the take is
+        // discarded rather than opened. Only if delete refuses (a pause
+        // toggle in flight) does the gate open, so the pipeline can finish.
+        if self.start_held() && matches!(self.phase, Phase::Recording { .. }) {
+            self.delete(cx);
+            if !matches!(self.phase, Phase::Recording { .. }) {
+                return;
+            }
+        }
         if let Some(gate) = self.start_gate.as_ref().filter(|gate| gate.is_held()) {
             gate.arm();
         }
@@ -1470,6 +1505,11 @@ impl RecordingSession {
     }
 
     pub fn toggle_pause(&mut self, cx: &mut Context<Self>) {
+        // A held take has one way in, its first Go: a pause or resume here
+        // would open a segment the gate does not cover.
+        if self.start_held() {
+            return;
+        }
         #[cfg(target_os = "linux")]
         if crate::app_windows::clean_capture_active(cx) {
             self.toggle_clean_capture_pause(cx);
