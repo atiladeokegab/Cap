@@ -328,10 +328,13 @@ impl TeleprompterWindow {
                 && this.countdown.is_none()
                 && resumed
             {
-                this.write_mark(action, window, cx);
+                this.write_mark(action, true, window, cx);
             }
             // A take starts: the film may have republished the list (pick-ups).
             let take = RecordingSession::global(cx).read(cx).shot_take();
+            if take != this.take {
+                this.to_top();
+            }
             if take.is_some() && take != this.take {
                 this.read_shot_list(false, window, cx);
             }
@@ -445,10 +448,19 @@ impl TeleprompterWindow {
         }
         if shots.hold(action) {
             set_recording_paused(true, cx);
+            // A new card starts at its top, not where the last one was.
+            self.to_top();
             cx.notify();
             return;
         }
-        self.write_mark(action, window, cx);
+        self.write_mark(action, false, window, cx);
+    }
+
+    /// The text from its first line, its reading time from the start.
+    fn to_top(&mut self) {
+        self.position = 0.;
+        self.shot_progress = 0.;
+        self.apply_scroll();
     }
 
     /// Reading -- the take's first shot before Go -- keeps a live take's
@@ -474,21 +486,28 @@ impl TeleprompterWindow {
 
     /// A mark in the live take's `shots.json`, and the shot's lines from the
     /// top, scrolling with the recording. Nothing while no studio recording
-    /// is running or it is paused.
-    fn write_mark(&mut self, action: shots::Action, window: &mut Window, cx: &mut Context<Self>) {
+    /// is running or it is paused. `at_resume`: Go's mark, stamped at the
+    /// confirmed resume's epoch -- the new segment's 0 -- not when this runs.
+    fn write_mark(
+        &mut self,
+        action: shots::Action,
+        at_resume: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(shots) = self.shots.as_mut() else {
             return;
         };
-        let Some((take, at)) = RecordingSession::global(cx).read(cx).shot_time() else {
+        let Some((take, (segment, time_ms))) = RecordingSession::global(cx).read(cx).shot_time()
+        else {
             return;
         };
+        let at = (segment, if at_resume { 0 } else { time_ms });
         self.shots_error = shots.mark(action, &take, at).err().map(|error| {
             tracing::error!(%error, "could not write shots.json");
             format!("Could not write shots.json: {error}")
         });
-        self.position = 0.;
-        self.shot_progress = 0.;
-        self.apply_scroll();
+        self.to_top();
         self.playback_state.requested = true;
         self.start_playback(window, cx);
         cx.notify();
@@ -500,12 +519,23 @@ impl TeleprompterWindow {
         let Some(shots) = self.shots.as_mut() else {
             return;
         };
-        if shots.go().is_none() {
-            if matches!(shots.cue, Cue::Countdown(_)) && self.countdown.is_none() {
+        if matches!(shots.cue, Cue::Countdown(_)) {
+            if self.countdown.is_none() {
                 set_recording_paused(false, cx);
             }
             return;
         }
+        // The 3-2-1 starts only from a confirmed pause, so its resume opens
+        // the shot's own segment.
+        let session = RecordingSession::global(cx).read(cx);
+        if !session.is_paused() || session.pause_pending() || session.pause_uncertain() {
+            return;
+        }
+        if shots.go().is_none() {
+            return;
+        }
+        // Only this take's countdown, still counting, resumes the recording.
+        let take = self.take.clone();
         let started = Instant::now();
         self.countdown = Some(started);
         self.countdown_task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -520,17 +550,17 @@ impl TeleprompterWindow {
                 })
                 .ok();
             }
-            this.update_in(cx, |this, window, cx| {
+            this.update_in(cx, |this, _, cx| {
                 this.countdown = None;
-                // Go on a fresh take: the recording never paused, so no resume
-                // comes to mark the first shot.
-                let running = RecordingSession::global(cx).read(cx).shot_time().is_some();
-                if let Some(Cue::Countdown(action)) = this.shots.as_ref().map(|shots| shots.cue)
-                    && running
+                // The resume's observer writes the mark.
+                if this.take == take
+                    && matches!(
+                        this.shots.as_ref().map(|shots| shots.cue),
+                        Some(Cue::Countdown(_))
+                    )
                 {
-                    this.write_mark(action, window, cx);
+                    set_recording_paused(false, cx);
                 }
-                set_recording_paused(false, cx);
                 cx.notify();
             })
             .ok();
@@ -584,6 +614,14 @@ impl TeleprompterWindow {
                 // Opened mid-take: show the shot the saved marks left on screen.
                 shots.follow(RecordingSession::global(cx).read(cx).shot_take().as_deref());
                 this.shots_error = warning.or(note);
+                // A new Reading card starts at its top.
+                if this
+                    .shots
+                    .as_ref()
+                    .is_some_and(|shots| shots.phase() == shots::Phase::Reading)
+                {
+                    this.to_top();
+                }
                 this.hold_reading(cx);
                 if first {
                     crate::hotkeys::set_shot_keys(true, cx);
@@ -740,7 +778,7 @@ impl TeleprompterWindow {
     }
 
     fn start_playback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.playback_state.running() {
+        if !self.playback_state.running() || !self.shot_running() {
             return;
         }
         self.position = (-f32::from(self.scroll.offset().y)).clamp(0., self.maximum_scroll());
@@ -783,10 +821,18 @@ impl TeleprompterWindow {
         cx.notify();
     }
 
+    /// Without a shot list, always; with one, only a Running shot scrolls by
+    /// itself -- never a card, even under a free-mode playback that was going.
+    fn shot_running(&self) -> bool {
+        self.shots
+            .as_ref()
+            .is_none_or(|shots| shots.phase() == shots::Phase::Running)
+    }
+
     /// One frame of `animatePlayback`. Returns false when the loop should stop
     /// -- bottom reached, or nothing left to scroll.
     fn advance(&mut self, elapsed: f32) -> bool {
-        if !self.playback_state.running() {
+        if !self.playback_state.running() || !self.shot_running() {
             return false;
         }
         let maximum = self.maximum_scroll();

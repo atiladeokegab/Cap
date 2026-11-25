@@ -595,7 +595,8 @@ impl Shots {
     /// live take (Reload, not the take's own read at its start) waits too,
     /// even before the first mark: the take keeps the list it started with.
     pub fn replace(&mut self, list: ShotList, during_take: bool) {
-        if self.started || (during_take && self.take.is_some()) {
+        // Go pressed or a card up: the countdown's shot must not move either.
+        if self.started || self.cue != Cue::Reading || (during_take && self.take.is_some()) {
             self.pending = Some(list);
         } else {
             self.list = list;
@@ -658,12 +659,13 @@ impl Shots {
     }
 
     /// A shot key that only flashes "Press Go to start": Next anywhere in
-    /// Reading (the take's first shot before Go, or a card waiting for Go),
-    /// and Retake before the first Go. Retake on a card still switches it.
+    /// Reading (the take's first shot before Go, or any card waiting for Go,
+    /// a Retake card included), and Retake before the first Go. Retake on a
+    /// card still switches it.
     pub fn flashes(&self, action: Action) -> bool {
         self.phase() == Phase::Reading
             && match action {
-                Action::Next => self.cue != Cue::Ready(Action::Retake),
+                Action::Next => true,
                 Action::Retake => !self.started,
             }
     }
@@ -854,13 +856,26 @@ mod tests {
 
     #[test]
     fn reading_shows_the_first_card_and_next_there_only_flashes() {
+        let take = std::env::temp_dir().join(format!("cap-shots-flash-{}", std::process::id()));
+        std::fs::create_dir_all(&take).unwrap();
         let mut shots = Shots::new(list());
         assert_eq!(shots.upcoming().unwrap().shot_id, "intro");
         assert!(shots.flashes(Action::Next) && shots.flashes(Action::Retake));
-        shots.follow(Some(Path::new("/nonexistent-take")));
+        shots.follow(Some(&take));
         shots.go();
         assert_eq!(shots.upcoming().unwrap().shot_id, "intro");
         assert!(!shots.flashes(Action::Next), "the 3-2-1 is not Reading");
+        // A list landing mid-countdown waits: the counted shot stays.
+        shots.replace(list(), false);
+        assert_eq!(shots.cue, Cue::Countdown(Action::Next));
+        shots.mark(Action::Next, &take, (1, 0)).unwrap();
+        assert!(!shots.flashes(Action::Next), "Running is not Reading");
+        // Next on the next card, then a Retake card: Next flashes on both.
+        assert!(shots.hold(Action::Next) && shots.flashes(Action::Next));
+        assert!(shots.hold(Action::Retake));
+        assert!(shots.flashes(Action::Next) && !shots.flashes(Action::Retake));
+        assert_eq!(shots.upcoming().unwrap().shot_id, "intro");
+        std::fs::remove_dir_all(&take).unwrap();
     }
 
     #[test]
