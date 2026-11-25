@@ -292,9 +292,12 @@ const SCRIPT_TEXT_PX: f32 = 30.;
 /// `next` and `retake` are the shot keys (Next on a started take holds on the
 /// next shot's card and pauses the recording; pressed again on its card it is
 /// Go), `go` starts the card's 3-2-1, `scroll` reads up to `line` (past the
-/// last: the STOP cue), `tick` only lets time pass. When the 3-2-1 is over the
-/// recording resumes as a new segment with that step as its epoch, and the
-/// held press marks there. One view per step.
+/// last: the STOP cue), `key` is Enter or Space (Go) or ArrowDown/ArrowUp
+/// (a line by hand in Reading), `wheel` scrolls `delta_lines` by hand, `tick`
+/// only lets time pass. The take opens in Reading with the recording paused;
+/// when Go's 3-2-1 is over the recording resumes as a new segment with that
+/// step as its epoch, and the held press marks there. Running scrolls
+/// `scroll_words` at the shot's pace. One view per step.
 fn prompter_op(request: &Value) -> Result<Value, String> {
     let script = request["script"].as_array().cloned().unwrap_or_default();
     let mut shots = match &request["shotlist"] {
@@ -320,13 +323,33 @@ fn prompter_op(request: &Value) -> Result<Value, String> {
         .map_or(shots::RUNNING_OPACITY_DEFAULT, running_opacity);
     let mut mouse_over = false;
     let mut clock = shots::ShotClock::default();
-    let (mut line, mut recording, mut go_at) = (0, true, None::<f64>);
+    // Reading first: paused until Go (A-11.1).
+    clock.pause();
+    let (mut line, mut recording, mut go_at) = (0, false, None::<f64>);
+    // Lines scrolled by hand in Reading; when the running shot's mark landed;
+    // when Next in Reading last flashed.
+    let (mut hand, mut marked_at, mut flash_at) = (0i64, None::<f64>, None::<f64>);
     let mut phase = shots.phase();
     let mut views = Vec::new();
     for step in &script {
         let ms = step["at_ms"].as_f64().unwrap_or(0.);
         let mut press = None;
-        match step["action"].as_str() {
+        let action = match (step["action"].as_str(), step["key"].as_str()) {
+            (Some("key"), Some("Enter" | "Space")) => Some("go"),
+            (Some("key"), Some("ArrowDown")) => Some("down"),
+            (Some("key"), Some("ArrowUp")) => Some("up"),
+            (Some("key"), _) => Some("tick"),
+            (action, _) => action,
+        };
+        match action {
+            Some(key @ ("next" | "retake"))
+                if shots.flashes(match key {
+                    "next" => shots::Action::Next,
+                    _ => shots::Action::Retake,
+                }) =>
+            {
+                flash_at = Some(ms);
+            }
             Some(key @ ("next" | "retake")) => {
                 let action = match key {
                     "next" => shots::Action::Next,
@@ -338,6 +361,7 @@ fn prompter_op(request: &Value) -> Result<Value, String> {
                     if !counting {
                         clock.pause();
                         recording = false;
+                        hand = 0;
                     }
                 } else {
                     press = Some(action);
@@ -354,8 +378,17 @@ fn prompter_op(request: &Value) -> Result<Value, String> {
             Some("go") => {
                 if shots.go().is_some() {
                     go_at = Some(ms);
+                    hand = 0;
                 }
             }
+            Some(scroll @ ("down" | "up" | "wheel")) if shots.phase() == shots::Phase::Reading => {
+                hand += match scroll {
+                    "down" => 1,
+                    "up" => -1,
+                    _ => step["delta_lines"].as_i64().unwrap_or(0),
+                };
+            }
+            Some("down" | "up" | "wheel") => {}
             Some("scroll") => {
                 line = step["line"].as_u64().unwrap_or(0) as usize;
                 if line >= shots.current().lines.len() {
@@ -382,18 +415,46 @@ fn prompter_op(request: &Value) -> Result<Value, String> {
         {
             shots.mark(action, take, time).map_err(|e| e.to_string())?;
             line = 0;
+            marked_at = Some(ms);
         }
         let card = shots.upcoming().filter(|_| !shots.done).map(|shot| {
             json!({
                 "title": shot.title,
                 "heading": shots.heading(shot),
-                "performer_label": shot.performer_label,
                 "on_screen": shot.on_screen,
                 "text_px": SCRIPT_TEXT_PX * shots::CARD_SCALE,
                 "full_window": true,
                 "go": count.is_none(),
+                "lines": shot.lines.iter()
+                    .map(|line| json!({ "text": line.text, "style": "line" }))
+                    .collect::<Vec<_>>(),
+                "actions": shot.actions.iter()
+                    .map(|action| json!({ "text": action, "style": "action" }))
+                    .collect::<Vec<_>>(),
+                "budget_s": shot.budget_s,
+                "budget_label": shot.budget_label(),
+                "performer_label": shot.performer(),
+                "prompt": shots::PROMPT,
+                "over_budget": shot.over_budget(),
             })
         });
+        // In Reading the card's lines above the one scrolled to by hand;
+        // Running, the shot's pace since its mark, up to its words.
+        let scroll_words = match (shots.phase(), card.is_some(), marked_at) {
+            (shots::Phase::Running, _, Some(from)) => {
+                let shot = shots.current();
+                (shot.pace() * (ms - from) / 1000.).min(shot.words() as f64)
+            }
+            (shots::Phase::Reading, true, _) => {
+                let shot = shots.upcoming().expect("a card");
+                hand = hand.clamp(0, shot.lines.len().saturating_sub(1) as i64);
+                shot.lines[..hand as usize]
+                    .iter()
+                    .map(|line| line.text.split_whitespace().count())
+                    .sum::<usize>() as f64
+            }
+            _ => 0.,
+        };
         let was = std::mem::replace(&mut phase, shots.phase());
         let look = shots::window_look(phase, opacity, mouse_over);
         let (state, color) = if recording {
@@ -404,7 +465,13 @@ fn prompter_op(request: &Value) -> Result<Value, String> {
         views.push(json!({
             "shot_id": shots.current().shot_id,
             "line": line,
-            "cue": (shots.cue == shots::Cue::Stop).then_some("stop"),
+            // Next while Running: STOP over the next shot's card (A-11.1).
+            "cue": matches!(shots.cue, shots::Cue::Stop | shots::Cue::Ready(shots::Action::Next))
+                .then_some("stop"),
+            "scroll_words": scroll_words,
+            "flash": flash_at
+                .filter(|at| ms - at < shots::FLASH_MS as f64)
+                .map(|_| shots::FLASH),
             "recording": recording,
             "card": card,
             "countdown": count,

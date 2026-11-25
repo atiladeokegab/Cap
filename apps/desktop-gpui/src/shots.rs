@@ -83,6 +83,82 @@ pub struct Shot {
         skip_serializing_if = "Option::is_none"
     )]
     pub performer_label: Option<String>,
+    /// Seconds the shot's lines should take, on its card and setting its
+    /// scroll (shot list 0.6.0); a 0.5.0 list estimates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_s: Option<f64>,
+    /// What the presenter does on screen, shown apart from the spoken lines.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<String>,
+}
+
+/// The teleprompter never scrolls faster than this, in spoken words a second.
+pub const MAX_WORDS_PER_SECOND: f64 = 2.5;
+/// A budget estimate's allowance for each on-screen action.
+pub const SECONDS_PER_ACTION: f64 = 2.;
+/// Under every Reading card.
+pub const PROMPT: &str = "Read, then press Go (Enter) to start";
+/// Next pressed in Reading: the one thing it does.
+pub const FLASH: &str = "Press Go to start";
+pub const FLASH_MS: u64 = 1500;
+
+impl Shot {
+    /// The spoken words: the lines', not the actions'.
+    pub fn words(&self) -> usize {
+        self.lines
+            .iter()
+            .map(|line| line.text.split_whitespace().count())
+            .sum()
+    }
+
+    /// `budget_s`, else ceil(words / 2.5) plus 2 s per action.
+    pub fn budget(&self) -> f64 {
+        self.budget_s.filter(|s| *s > 0.).unwrap_or_else(|| {
+            (self.words() as f64 / MAX_WORDS_PER_SECOND).ceil()
+                + SECONDS_PER_ACTION * self.actions.len() as f64
+        })
+    }
+
+    /// "20 s", or "~6 s (estimated)" without a budget.
+    pub fn budget_label(&self) -> String {
+        let seconds = self.budget();
+        let seconds = if seconds.fract() == 0. {
+            format!("{seconds:.0}")
+        } else {
+            format!("{seconds:.1}")
+        };
+        match self.budget_s.filter(|s| *s > 0.) {
+            Some(_) => format!("{seconds} s"),
+            None => format!("~{seconds} s (estimated)"),
+        }
+    }
+
+    /// More words than the budget allows at 2.5 a second.
+    pub fn over_budget(&self) -> bool {
+        self.words() as f64 / self.budget() > MAX_WORDS_PER_SECOND
+    }
+
+    /// Words a second while Running: the lines over the budget, capped.
+    pub fn pace(&self) -> f64 {
+        (self.words() as f64 / self.budget()).min(MAX_WORDS_PER_SECOND)
+    }
+
+    /// Seconds the lines take at [`Shot::pace`], floored at 1 s so an empty
+    /// shot still reaches its STOP cue.
+    pub fn reading_seconds(&self) -> f64 {
+        match self.pace() {
+            pace if pace > 0. => (self.words() as f64 / pace).max(1.),
+            _ => 1.,
+        }
+    }
+
+    /// Who speaks it: the list's 0.5.0 "lead", or no label, reads Presenter.
+    pub fn performer(&self) -> &str {
+        match self.performer_label.as_deref() {
+            None | Some("lead") => "Presenter",
+            Some(label) => label,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -533,6 +609,8 @@ impl Shots {
     /// The shot a Ready or Countdown cue's action starts, for its card.
     pub fn upcoming(&self) -> Option<&Shot> {
         match self.cue {
+            // Reading the take's first shot before its Go (A-11.1).
+            Cue::Reading if !self.started => Some(self.current()),
             // Go on a fresh take counts in its first shot.
             Cue::Countdown(Action::Next) if !self.started => Some(self.current()),
             Cue::Ready(Action::Next) | Cue::Countdown(Action::Next) => {
@@ -577,6 +655,17 @@ impl Shots {
         };
         self.cue = Cue::Countdown(action);
         Some(action)
+    }
+
+    /// A shot key that only flashes "Press Go to start": Next anywhere in
+    /// Reading (the take's first shot before Go, or a card waiting for Go),
+    /// and Retake before the first Go. Retake on a card still switches it.
+    pub fn flashes(&self, action: Action) -> bool {
+        self.phase() == Phase::Reading
+            && match action {
+                Action::Next => self.cue != Cue::Ready(Action::Retake),
+                Action::Retake => !self.started,
+            }
     }
 
     pub fn phase(&self) -> Phase {
@@ -723,6 +812,55 @@ mod tests {
             ]}"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn budget_pace_and_performer_with_and_without_0_6_0_fields() {
+        let shot = |json: &str| parse(json.as_bytes()).unwrap().shots.remove(0);
+        let line = |n: usize| {
+            format!(r#"{{"sentence_id": "s{n}", "text": "one two three four five six seven."}}"#)
+        };
+        let lines = format!("[{}, {}]", line(1), line(2));
+        // 0.5.0: 14 words, ceil(14 / 2.5) = 6 s, Presenter for lead or none.
+        let old = shot(&format!(
+            r#"{{"shots": [{{"shot_id": "a", "title": "A", "performer_label": "lead", "lines": {lines}}}]}}"#
+        ));
+        assert_eq!(
+            (old.budget(), old.budget_label()),
+            (6., "~6 s (estimated)".into())
+        );
+        assert_eq!(old.performer(), "Presenter");
+        assert!(!old.over_budget() && old.pace() <= MAX_WORDS_PER_SECOND);
+        let acted = shot(&format!(
+            r#"{{"shots": [{{"shot_id": "a", "title": "A", "actions": ["Click", "Drag"], "lines": {lines}}}]}}"#
+        ));
+        assert_eq!(acted.budget_label(), "~10 s (estimated)");
+        // 14 words over 20 s: 0.7 a second; over 2 s it would be 7, capped.
+        let slow = shot(&format!(
+            r#"{{"shots": [{{"shot_id": "a", "title": "A", "budget_s": 20, "performer_label": "Speaker 1", "lines": {lines}}}]}}"#
+        ));
+        assert_eq!(
+            (slow.budget_label(), slow.performer()),
+            ("20 s".into(), "Speaker 1")
+        );
+        assert!((slow.pace() - 0.7).abs() < 1e-9 && (slow.reading_seconds() - 20.).abs() < 1e-9);
+        let rushed = shot(&format!(
+            r#"{{"shots": [{{"shot_id": "a", "title": "A", "budget_s": 2, "lines": {lines}}}]}}"#
+        ));
+        assert!(rushed.over_budget() && rushed.pace() == MAX_WORDS_PER_SECOND);
+        // An empty shot still ends.
+        assert_eq!(list().shots[1].reading_seconds(), 1.);
+    }
+
+    #[test]
+    fn reading_shows_the_first_card_and_next_there_only_flashes() {
+        let mut shots = Shots::new(list());
+        assert_eq!(shots.upcoming().unwrap().shot_id, "intro");
+        assert!(shots.flashes(Action::Next) && shots.flashes(Action::Retake));
+        shots.follow(Some(Path::new("/nonexistent-take")));
+        shots.go();
+        assert_eq!(shots.upcoming().unwrap().shot_id, "intro");
+        assert!(!shots.flashes(Action::Next), "the 3-2-1 is not Reading");
     }
 
     #[test]

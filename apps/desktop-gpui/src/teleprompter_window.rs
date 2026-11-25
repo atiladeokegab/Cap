@@ -71,8 +71,6 @@ const FOOTER_HEIGHT: f32 = 44.;
 const WPM_MIN: f32 = 60.;
 const WPM_MAX: f32 = 350.;
 const WPM_STEP: f32 = 5.;
-/// One press of the shot list's slower / faster buttons.
-const WPM_PACE_STEP: f32 = 10.;
 
 /// `min="45" max="100" step="5"` on the opacity range. The floor is the same
 /// 0.45 `set_window_opacity` clamps to.
@@ -248,6 +246,8 @@ pub struct TeleprompterWindow {
     /// waits for the recording's own resume).
     countdown: Option<Instant>,
     countdown_task: Option<gpui::Task<()>>,
+    /// Next pressed in Reading: "Press Go to start", briefly.
+    flash: Option<gpui::Task<()>>,
     /// Shot-list reads in flight; the newest to land wins.
     reads: shots::Reads,
     /// The live take last seen: a new one reads the list again.
@@ -336,6 +336,7 @@ impl TeleprompterWindow {
                 this.read_shot_list(false, window, cx);
             }
             this.take = take;
+            this.hold_reading(cx);
             cx.notify();
             window.refresh();
         });
@@ -390,6 +391,7 @@ impl TeleprompterWindow {
             shots_error: None,
             countdown: None,
             countdown_task: None,
+            flash: None,
             reads: shots::Reads::default(),
             take: session.read(cx).shot_take(),
             phase: None,
@@ -425,12 +427,49 @@ impl TeleprompterWindow {
         if matches!(shots.cue, Cue::Countdown(_)) {
             return;
         }
+        // In Reading only Go starts the shot: Next flashes how (A-11.1).
+        if shots.flashes(action) {
+            self.flash = Some(cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(shots::FLASH_MS))
+                    .await;
+                this.update_in(cx, |this, window, cx| {
+                    this.flash = None;
+                    cx.notify();
+                    window.refresh();
+                })
+                .ok();
+            }));
+            cx.notify();
+            return;
+        }
         if shots.hold(action) {
             set_recording_paused(true, cx);
             cx.notify();
             return;
         }
         self.write_mark(action, window, cx);
+    }
+
+    /// Reading -- the take's first shot before Go -- keeps a live take's
+    /// recording paused, so nothing is recorded while the presenter reads.
+    fn hold_reading(&self, cx: &mut Context<Self>) {
+        let reading = self.shots.as_ref().is_some_and(|shots| {
+            shots.phase() == shots::Phase::Reading && shots.upcoming().is_some()
+        });
+        if reading && RecordingSession::global(cx).read(cx).shot_take().is_some() {
+            set_recording_paused(true, cx);
+        }
+    }
+
+    /// A line of the card by hand in Reading: arrow keys (the wheel scrolls
+    /// it natively).
+    fn scroll_card(&mut self, lines: f32, cx: &mut Context<Self>) {
+        let step = self.state.font_size * self.state.line_height;
+        self.position =
+            (-f32::from(self.scroll.offset().y) + lines * step).clamp(0., self.maximum_scroll());
+        self.apply_scroll();
+        cx.notify();
     }
 
     /// A mark in the live take's `shots.json`, and the shot's lines from the
@@ -545,6 +584,7 @@ impl TeleprompterWindow {
                 // Opened mid-take: show the shot the saved marks left on screen.
                 shots.follow(RecordingSession::global(cx).read(cx).shot_take().as_deref());
                 this.shots_error = warning.or(note);
+                this.hold_reading(cx);
                 if first {
                     crate::hotkeys::set_shot_keys(true, cx);
                     this.focus_root(window, cx);
@@ -651,17 +691,6 @@ impl TeleprompterWindow {
         self.edit_script(move |script| *script = next, window, cx);
     }
 
-    /// The shot list's slower / faster buttons, clamped to the speed range.
-    fn change_pace(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
-        let next = clamp(self.state.words_per_minute as f32 + delta, WPM_MIN, WPM_MAX) as u32;
-        if next == self.state.words_per_minute {
-            return;
-        }
-        self.state.words_per_minute = next;
-        self.touch(TeleprompterState::WORDS_PER_MINUTE, window, cx);
-        cx.notify();
-    }
-
     /// `changeFontSize(delta)`, clamped 22-52.
     fn change_font_size(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
         let next = clamp(self.state.font_size + delta, FONT_SIZE_MIN, FONT_SIZE_MAX);
@@ -763,18 +792,12 @@ impl TeleprompterWindow {
         let maximum = self.maximum_scroll();
         if let Some(shots) = &self.shots {
             // The shot's reading time, not its height, decides when STOP
-            // shows: lines that fit sit still until then.
-            let words = shots
-                .current()
-                .lines
-                .iter()
-                .map(|line| count_words(&line.text))
-                .sum();
+            // shows: lines that fit sit still until then. Its budget sets
+            // the pace, never over 2.5 words a second (A-11.1).
             self.shot_progress = teleprompter_pace::advance_progress(
                 self.shot_progress,
                 elapsed,
-                words,
-                self.state.words_per_minute,
+                shots.current().reading_seconds() as f32,
             );
             let view = f32::from(self.scroll.bounds().size.height);
             self.position =
@@ -1001,7 +1024,15 @@ impl TeleprompterWindow {
                 cx.notify();
             }
             _ => {
-                if let Some(action) = shot_key(&event.keystroke) {
+                let reading = self
+                    .shots
+                    .as_ref()
+                    .is_some_and(|shots| shots.phase() == shots::Phase::Reading);
+                let key = event.keystroke.key.as_str();
+                if reading && matches!(key, "down" | "up") && !event.keystroke.modifiers.modified()
+                {
+                    self.scroll_card(if key == "down" { 1. } else { -1. }, cx);
+                } else if let Some(action) = shot_key(&event.keystroke) {
                     self.mark_shot(action, window, cx);
                 } else if matches!(event.keystroke.key.as_str(), "enter" | "space")
                     && !event.keystroke.modifiers.modified()
@@ -1225,40 +1256,8 @@ impl TeleprompterWindow {
                                 shots.list.shots.len(),
                                 shot.title
                             ))
-                            // The footer is full: the pace sits by the title,
-                            // where the eye already is while recording.
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .flex_shrink_0()
-                                    .child(
-                                        self.tool_button(
-                                            "pace-slower",
-                                            "icons/minus.svg",
-                                            false,
-                                            cx.listener(|this, _, window, cx| {
-                                                this.change_pace(-WPM_PACE_STEP, window, cx);
-                                            }),
-                                        )
-                                        .size(px(20.))
-                                        .icon_size(px(12.)),
-                                    )
-                                    .child(format!("{} wpm", self.state.words_per_minute))
-                                    .child(
-                                        self.tool_button(
-                                            "pace-faster",
-                                            "icons/plus.svg",
-                                            false,
-                                            cx.listener(|this, _, window, cx| {
-                                                this.change_pace(WPM_PACE_STEP, window, cx);
-                                            }),
-                                        )
-                                        .size(px(20.))
-                                        .icon_size(px(12.)),
-                                    ),
-                            ),
+                            // The budget sets the pace (A-11.1).
+                            .child(shot.budget_label()),
                     )
                     .when_some(shot.on_screen.clone(), |this, on_screen| {
                         this.child(
@@ -1362,8 +1361,10 @@ impl TeleprompterWindow {
             })
     }
 
-    /// Between shots, the recording paused: the shot Go starts, large, and
-    /// Go -- once pressed, its 3-2-1.
+    /// Reading, the recording paused: the shot Go starts -- its heading, who
+    /// speaks it, its budget, its full lines and, apart from them, its
+    /// actions -- and Go, then once pressed its 3-2-1. STOP above it after
+    /// Next while Running.
     fn render_card(
         &self,
         shots: &Shots,
@@ -1391,10 +1392,19 @@ impl TeleprompterWindow {
             .flex()
             .flex_col()
             .items_center()
-            .justify_center()
-            .gap(px(10.))
+            .gap(px(8.))
             .px(px(32.))
+            .py(px(8.))
             .text_center()
+            .when(shots.cue == Cue::Ready(shots::Action::Next), |this| {
+                this.child(
+                    div()
+                        .text_size(px(size))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(Hsla::from(theme.red_9))
+                        .child("STOP"),
+                )
+            })
             .child(
                 div()
                     .text_size(px(12.))
@@ -1413,20 +1423,66 @@ impl TeleprompterWindow {
                     .text_color(Hsla::from(theme.gray_12))
                     .child(shots.heading(card)),
             )
-            .when_some(card.performer_label.clone(), |this, performer| {
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .text_color(Hsla::from(theme.gray_11))
+                    .child(format!(
+                        "{} \u{b7} {}",
+                        card.performer(),
+                        card.budget_label()
+                    )),
+            )
+            .when(card.over_budget(), |this| {
                 this.child(
                     div()
-                        .text_size(px(size))
-                        .text_color(Hsla::from(theme.gray_11))
-                        .child(performer),
+                        .text_size(px(12.))
+                        .text_color(Hsla::from(theme.red_9))
+                        .child("Over budget: scrolls at 2.5 words a second"),
                 )
             })
             .when_some(card.on_screen.clone(), |this, on_screen| {
                 this.child(
                     div()
-                        .text_size(px(size))
+                        .text_size(px(14.))
                         .text_color(Hsla::from(theme.blue_10))
                         .child(format!("On screen: {on_screen}")),
+                )
+            })
+            // The whole shot, scrolled by hand (arrow keys, wheel) when long.
+            .child(
+                div()
+                    .id("card-lines")
+                    .track_scroll(&self.scroll)
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .children(card.lines.iter().map(|line| {
+                        div()
+                            .text_size(px(size))
+                            .line_height(px(size * self.state.line_height))
+                            .text_color(Hsla::from(theme.gray_12))
+                            .child(line.text.clone())
+                    }))
+                    .children(card.actions.iter().map(|action| {
+                        div()
+                            .text_size(px(size * 0.75))
+                            .italic()
+                            .text_color(Hsla::from(theme.blue_10))
+                            .child(format!("\u{25b8} {action}"))
+                    })),
+            )
+            .when(self.flash.is_some(), |this| {
+                this.child(
+                    div()
+                        .text_size(px(16.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(Hsla::from(gpui::rgb(shots::PAUSED_COLOR)))
+                        .child(shots::FLASH),
                 )
             })
             .child(match count {
@@ -1458,6 +1514,14 @@ impl TeleprompterWindow {
                     .hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.11)))
                     .on_click(cx.listener(|this, _, window, cx| this.go(window, cx)))
                     .into_any_element(),
+            })
+            .when(count.is_none(), |this| {
+                this.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(Hsla::from(theme.gray_11))
+                        .child(shots::PROMPT),
+                )
             })
     }
 
