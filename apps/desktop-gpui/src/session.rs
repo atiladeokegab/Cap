@@ -597,6 +597,23 @@ impl RecordingSession {
         Some((take, at))
     }
 
+    /// A planned take still waiting for its first Go: the gate drops every
+    /// frame, and no mark has a clock yet.
+    pub fn start_held(&self) -> bool {
+        self.start_gate
+            .as_ref()
+            .is_some_and(cap_recording::RecordingStartGate::is_held)
+    }
+
+    /// The first Go's countdown is over: capture starts here, segment 0's
+    /// zero.
+    pub fn release_start(&mut self, cx: &mut Context<Self>) {
+        if let Some(gate) = self.start_gate.as_ref().filter(|gate| gate.is_held()) {
+            gate.arm();
+            cx.notify();
+        }
+    }
+
     pub fn is_paused(&self) -> bool {
         matches!(self.phase, Phase::Recording { paused: true })
     }
@@ -719,6 +736,11 @@ impl RecordingSession {
             .recording_countdown
             .unwrap_or(0);
         let start_gate = cap_recording::RecordingStartGate::new();
+        // A planned Studio take (the teleprompter has a shot list) captures
+        // nothing until the first Go; held before any pipeline sees the gate.
+        if config.mode == recording::RecordingMode::Studio && crate::hotkeys::shot_keys_on(cx) {
+            start_gate.hold();
+        }
         let config = StartConfig {
             start_gate: Some(start_gate.clone()),
             ..config
@@ -821,6 +843,10 @@ impl RecordingSession {
             cx,
             futures_util::future::Abortable::new(
                 play_cue_when_primed(primed, gate, move |gate| async move {
+                    // Held for the first Go, which arms it: no cue, no arm.
+                    if gate.is_held() {
+                        return;
+                    }
                     match cue {
                         Some(cue) => crate::app_sounds::play_recording_start_sound(cue, gate).await,
                         None => {
@@ -1141,6 +1167,11 @@ impl RecordingSession {
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
+        // Stopped before the first Go: open the gate as the cancel paths do,
+        // so the pipeline finishes instead of waiting on a held gate.
+        if let Some(gate) = self.start_gate.as_ref().filter(|gate| gate.is_held()) {
+            gate.arm();
+        }
         #[cfg(target_os = "linux")]
         if matches!(self.phase, Phase::Starting | Phase::Stopping)
             && let Some(attempt) = self.instant_attempt.clone()

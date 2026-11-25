@@ -479,7 +479,10 @@ impl TeleprompterWindow {
         let reading = self.shots.as_ref().is_some_and(|shots| {
             shots.phase() == shots::Phase::Reading && shots.upcoming().is_some()
         });
-        if reading && RecordingSession::global(cx).read(cx).shot_take().is_some() {
+        let session = RecordingSession::global(cx).read(cx);
+        // A held start captures nothing yet: no pause, which would end
+        // segment 0 empty.
+        if reading && session.shot_take().is_some() && !session.start_held() {
             set_recording_paused(true, cx);
         }
     }
@@ -531,14 +534,16 @@ impl TeleprompterWindow {
         };
         if matches!(shots.cue, Cue::Countdown(_)) {
             if self.countdown.is_none() {
-                set_recording_paused(false, cx);
+                start_shot(cx);
             }
             return;
         }
-        // The 3-2-1 starts only from a confirmed pause, so its resume opens
-        // the shot's own segment.
+        // The 3-2-1 starts only from a held start or a confirmed pause, so
+        // what follows it opens the shot's own segment.
         let session = RecordingSession::global(cx).read(cx);
-        if !session.is_paused() || session.pause_pending() || session.pause_uncertain() {
+        if !session.start_held()
+            && (!session.is_paused() || session.pause_pending() || session.pause_uncertain())
+        {
             return;
         }
         if shots.go().is_none() {
@@ -569,7 +574,7 @@ impl TeleprompterWindow {
                         Some(Cue::Countdown(_))
                     )
                 {
-                    set_recording_paused(false, cx);
+                    start_shot(cx);
                 }
                 cx.notify();
             })
@@ -1941,6 +1946,17 @@ impl TeleprompterWindow {
 
 /// Pause or resume the recording, unless it is already there or a pause or
 /// resume is still on its way.
+/// Go's countdown is over: the first one opens the held gate, later ones
+/// resume the pause.
+fn start_shot(cx: &mut gpui::App) {
+    let session = RecordingSession::global(cx);
+    if session.read(cx).start_held() {
+        session.update(cx, |session, cx| session.release_start(cx));
+    } else {
+        set_recording_paused(false, cx);
+    }
+}
+
 fn set_recording_paused(paused: bool, cx: &mut gpui::App) {
     RecordingSession::global(cx).update(cx, |session, cx| {
         if matches!(session.phase, Phase::Recording { paused: now } if now != paused)

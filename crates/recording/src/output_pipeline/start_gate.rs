@@ -28,6 +28,7 @@ struct Inner {
     created: Instant,
     failsafe_logged: AtomicBool,
     video_origin_at_arm: AtomicBool,
+    held: AtomicBool,
 }
 
 impl Default for RecordingStartGate {
@@ -43,7 +44,20 @@ impl RecordingStartGate {
             created: Instant::now(),
             failsafe_logged: AtomicBool::new(false),
             video_origin_at_arm: AtomicBool::new(false),
+            held: AtomicBool::new(false),
         }))
+    }
+
+    /// Keeps the gate closed past the failsafe until an explicit arm: a
+    /// planned take (a teleprompter shot list) opens on the first Go, however
+    /// long its first card is read. Call before handing the gate to a pipeline.
+    pub fn hold(&self) {
+        self.0.held.store(true, Ordering::Release);
+    }
+
+    /// Held and not yet armed: capture is waiting for the first Go.
+    pub fn is_held(&self) -> bool {
+        self.0.held.load(Ordering::Acquire) && !self.is_armed()
     }
 
     /// Stamps the first admitted video frame at the arm point, so the video
@@ -105,7 +119,7 @@ impl RecordingStartGate {
         if let Some(at) = self.0.armed_at.get() {
             return Some(*at);
         }
-        if self.0.created.elapsed() < START_GATE_FAILSAFE {
+        if self.0.held.load(Ordering::Acquire) || self.0.created.elapsed() < START_GATE_FAILSAFE {
             return None;
         }
         let _ = self.0.armed_at.set(Timestamps::now());
@@ -218,6 +232,35 @@ mod tests {
         let admitted = Timestamp::Instant(epoch.instant() + Duration::from_millis(12));
         let lead = gate.video_origin_lead(admitted, epoch).unwrap();
         assert!(lead.abs_diff(Duration::from_millis(12)) < Duration::from_micros(1));
+    }
+
+    #[test]
+    fn a_held_gate_stays_closed_past_the_failsafe_until_armed() {
+        let gate = RecordingStartGate(Arc::new(Inner {
+            armed_at: OnceLock::new(),
+            created: Instant::now() - START_GATE_FAILSAFE - Duration::from_secs(1),
+            failsafe_logged: AtomicBool::new(false),
+            video_origin_at_arm: AtomicBool::new(false),
+            held: AtomicBool::new(false),
+        }));
+        gate.hold();
+        let now = Timestamps::now();
+        assert!(!gate.admits_video(at(now, 0)));
+        assert!(gate.is_held() && !gate.is_armed());
+        assert!(gate.arm_at(now));
+        assert!(gate.admits_video(at(now, 0)) && !gate.is_held());
+
+        let unheld = RecordingStartGate(Arc::new(Inner {
+            armed_at: OnceLock::new(),
+            created: Instant::now() - START_GATE_FAILSAFE - Duration::from_secs(1),
+            failsafe_logged: AtomicBool::new(false),
+            video_origin_at_arm: AtomicBool::new(false),
+            held: AtomicBool::new(false),
+        }));
+        assert!(
+            unheld.admits_video(at(Timestamps::now(), 1_000)),
+            "failsafe still opens an unheld gate"
+        );
     }
 
     #[test]

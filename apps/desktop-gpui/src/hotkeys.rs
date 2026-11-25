@@ -336,6 +336,12 @@ pub fn set_shot_keys(on: bool, cx: &mut App) {
     reload(cx);
 }
 
+/// The teleprompter has a shot list loaded (its shot keys are bound).
+pub fn shot_keys_on(cx: &App) -> bool {
+    cx.try_global::<Hotkeys>()
+        .is_some_and(|hotkeys| hotkeys.shot_keys)
+}
+
 pub fn unavailable_actions(cx: &App) -> Vec<&'static str> {
     cx.try_global::<Hotkeys>()
         .map(|hotkeys| {
